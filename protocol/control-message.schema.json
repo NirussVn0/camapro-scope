@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://camapro.scope/schema/control-message-v1.json",
+  "title": "Camapro Scope Control Message v1 (frozen G1.2)",
+  "description": "Discriminated message variants. Directions: desktop->phone = hello, camera.set, session.start, session.stop, ping; phone->desktop = capabilities, camera.state, pong, response, error. Request IDs are JSON-safe integers scoped to a connection generation. Temporal/capability semantics (duplicate cache, generations, ranges, atomic manual exposure) are validated by semantic rules in each runtime, not here.",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/hello" },
+    { "$ref": "#/$defs/capabilities" },
+    { "$ref": "#/$defs/cameraState" },
+    { "$ref": "#/$defs/cameraSet" },
+    { "$ref": "#/$defs/sessionStart" },
+    { "$ref": "#/$defs/sessionStop" },
+    { "$ref": "#/$defs/ping" },
+    { "$ref": "#/$defs/pong" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "safeId": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "generation": { "type": "integer", "minimum": 0 },
+    "cameraId": { "type": "string", "minLength": 1 },
+    "revision": { "type": "integer", "minimum": 0 },
+    "hello": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "id", "type", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/safeId" },
+        "type": { "const": "hello" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["majorVersion", "identityRef", "client"],
+          "properties": {
+            "majorVersion": { "type": "integer", "minimum": 1 },
+            "identityRef": { "type": "string", "minLength": 1 },
+            "client": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version"],
+              "properties": {
+                "name": { "type": "string", "minLength": 1 },
+                "version": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "capabilities" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["revision", "cameras"],
+          "properties": {
+            "revision": { "$ref": "#/$defs/revision" },
+            "cameras": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["cameraId", "modes", "controls"],
+                "properties": {
+                  "cameraId": { "$ref": "#/$defs/cameraId" },
+                  "modes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["width", "height", "fps"],
+                      "properties": {
+                        "width": { "type": "integer", "minimum": 1 },
+                        "height": { "type": "integer", "minimum": 1 },
+                        "fps": { "type": "integer", "minimum": 1 }
+                      }
+                    }
+                  },
+                  "controls": { "type": "object" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "cameraState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "camera.state" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cameraId", "revision", "streamState", "applied"],
+          "properties": {
+            "cameraId": { "$ref": "#/$defs/cameraId" },
+            "revision": { "$ref": "#/$defs/revision" },
+            "streamState": { "enum": ["off", "starting", "streaming", "stopping"] },
+            "applied": { "type": "object" }
+          }
+        }
+      }
+    },
+    "cameraSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "id", "type", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/safeId" },
+        "type": { "const": "camera.set" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cameraId", "capabilityRevision", "changes"],
+          "properties": {
+            "cameraId": { "$ref": "#/$defs/cameraId" },
+            "capabilityRevision": { "$ref": "#/$defs/revision" },
+            "changes": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "properties": {
+                "aeEnabled": { "type": "boolean" },
+                "exposureCompensationSteps": { "type": "integer" },
+                "iso": { "type": "integer", "minimum": 1 },
+                "shutterNanos": { "type": "integer", "minimum": 1 },
+                "focusDistanceDiopters": { "type": "number", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "sessionStart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "id", "type", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/safeId" },
+        "type": { "const": "session.start" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transport", "sessionGeneration", "profile"],
+          "properties": {
+            "transport": { "const": "mjpeg" },
+            "sessionGeneration": { "$ref": "#/$defs/generation" },
+            "profile": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["width", "height", "fps"],
+              "properties": {
+                "width": { "type": "integer", "minimum": 1 },
+                "height": { "type": "integer", "minimum": 1 },
+                "fps": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "sessionStop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "id", "type", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/safeId" },
+        "type": { "const": "session.stop" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sessionGeneration"],
+          "properties": {
+            "sessionGeneration": { "$ref": "#/$defs/generation" }
+          }
+        }
+      }
+    },
+    "ping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "id", "type", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/safeId" },
+        "type": { "const": "ping" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sessionGeneration"],
+          "properties": {
+            "sessionGeneration": { "$ref": "#/$defs/generation" }
+          }
+        }
+      }
+    },
+    "pong": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "id", "type", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/safeId" },
+        "type": { "const": "pong" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sessionGeneration"],
+          "properties": {
+            "sessionGeneration": { "$ref": "#/$defs/generation" }
+          }
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "id", "type", "ok", "result"],
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/safeId" },
+        "type": { "const": "response" },
+        "ok": { "const": true },
+        "result": { "type": "object" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "ok", "error"],
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/safeId" },
+        "type": { "const": "error" },
+        "ok": { "const": false },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "retryable"],
+          "properties": {
+            "code": {
+              "enum": [
+                "unsupported_version",
+                "unauthenticated",
+                "forbidden",
+                "busy",
+                "invalid_payload",
+                "unsupported_control",
+                "stale_capabilities",
+                "invalid_state",
+                "timeout",
+                "permission_denied",
+                "media_failure",
+                "internal"
+              ]
+            },
+            "message": { "type": "string", "minLength": 1 },
+            "retryable": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}

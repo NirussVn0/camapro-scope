@@ -1,0 +1,166 @@
+{
+  "fixtures": {
+    "invalid/empty-changes.json": {
+      "expect": "invalid",
+      "reason": "changes_must_be_non_empty"
+    },
+    "invalid/error-missing-code.json": {
+      "expect": "invalid",
+      "reason": "error_requires_code"
+    },
+    "invalid/error-unknown-code.json": {
+      "expect": "invalid",
+      "reason": "unknown_error_code"
+    },
+    "invalid/event-with-request-id.json": {
+      "expect": "invalid",
+      "reason": "event_forbids_id"
+    },
+    "invalid/id-beyond-safe-integer.json": {
+      "expect": "invalid",
+      "reason": "id_out_of_range"
+    },
+    "invalid/id-float.json": {
+      "expect": "invalid",
+      "reason": "id_not_safe_integer"
+    },
+    "invalid/id-negative.json": {
+      "expect": "invalid",
+      "reason": "id_out_of_range"
+    },
+    "invalid/id-string.json": {
+      "expect": "invalid",
+      "reason": "id_not_integer"
+    },
+    "invalid/missing-type.json": {
+      "expect": "invalid",
+      "reason": "missing_required_field"
+    },
+    "invalid/missing-version.json": {
+      "expect": "invalid",
+      "reason": "missing_required_field"
+    },
+    "invalid/non-integer-ev-steps.json": {
+      "expect": "invalid",
+      "reason": "ev_steps_must_be_integer"
+    },
+    "invalid/payload-not-object.json": {
+      "expect": "invalid",
+      "reason": "payload_must_be_object"
+    },
+    "invalid/request-missing-id.json": {
+      "expect": "invalid",
+      "reason": "request_requires_id"
+    },
+    "invalid/response-missing-ok.json": {
+      "expect": "invalid",
+      "reason": "response_requires_ok"
+    },
+    "invalid/response-with-error-object.json": {
+      "expect": "invalid",
+      "reason": "response_conflicting_fields"
+    },
+    "invalid/unknown-control-key.json": {
+      "expect": "invalid",
+      "reason": "unknown_control_key"
+    },
+    "invalid/unknown-top-level-field.json": {
+      "expect": "invalid",
+      "reason": "unknown_top_level_field"
+    },
+    "invalid/unknown-type.json": {
+      "expect": "invalid",
+      "reason": "unknown_type"
+    },
+    "invalid/unsupported-version.json": {
+      "expect": "invalid",
+      "reason": "unsupported_version"
+    },
+    "semantic/duplicate-id-changed-content.json": {
+      "caseExpectation": "reject",
+      "expect": "semantic",
+      "reason": "invalid_payload"
+    },
+    "semantic/duplicate-id-same-content.json": {
+      "caseExpectation": "cache_replay",
+      "expect": "semantic",
+      "reason": "duplicate_request"
+    },
+    "semantic/manual-exposure-not-atomic.json": {
+      "caseExpectation": "reject",
+      "expect": "semantic",
+      "reason": "invalid_payload"
+    },
+    "semantic/out-of-range-ev-steps.json": {
+      "caseExpectation": "reject",
+      "expect": "semantic",
+      "reason": "invalid_state"
+    },
+    "semantic/oversized-control-message.json": {
+      "caseExpectation": "reject",
+      "expect": "semantic",
+      "reason": "invalid_payload"
+    },
+    "semantic/partial-manual-exposure.json": {
+      "caseExpectation": "reject",
+      "expect": "semantic",
+      "reason": "invalid_payload"
+    },
+    "semantic/stale-capabilities-revision.json": {
+      "caseExpectation": "reject",
+      "expect": "semantic",
+      "reason": "stale_capabilities"
+    },
+    "semantic/stale-generation-event.json": {
+      "caseExpectation": "ignore",
+      "expect": "semantic",
+      "reason": "stale_generation"
+    },
+    "semantic/wrong-direction-request.json": {
+      "caseExpectation": "reject",
+      "expect": "semantic",
+      "reason": "forbidden"
+    },
+    "valid/camera.set.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    },
+    "valid/camera.state.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    },
+    "valid/capabilities.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    },
+    "valid/error.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    },
+    "valid/hello.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    },
+    "valid/ping.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    },
+    "valid/pong.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    },
+    "valid/response.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    },
+    "valid/session.start.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    },
+    "valid/session.stop.json": {
+      "expect": "valid",
+      "reason": "envelope_ok"
+    }
+  },
+  "schemaId": "https://camapro.scope/schema/control-message-v1.json"
+}

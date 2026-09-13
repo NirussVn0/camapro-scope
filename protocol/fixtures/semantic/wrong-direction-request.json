@@ -1,0 +1,1 @@
+{"case":"wrong_direction_request","expect":"reject","reasonClass":"forbidden","description":"camera.set is desktop->phone only; a phone-originated camera.set must fail closed as forbidden.","messages":[{"v":1,"id":42,"type":"camera.set","payload":{"cameraId":"0","capabilityRevision":3,"changes":{"exposureCompensationSteps":2}}}],"context":{"observedDirection":"phone_to_desktop"}}

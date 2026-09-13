@@ -1,0 +1,1 @@
+{"v":1,"type":"capabilities","payload":{"revision":3,"cameras":[{"cameraId":"0","modes":[{"width":1280,"height":720,"fps":30},{"width":1920,"height":1080,"fps":30}],"controls":{"exposureCompensation":{"step":1,"min":-6,"max":6,"evPerStep":"1/3"},"iso":{"min":50,"max":6400},"shutterNanos":{"min":1000,"max":33333333},"focusDistanceDiopters":{"min":0.0,"max":10.0,"manual":true}}}]}}
