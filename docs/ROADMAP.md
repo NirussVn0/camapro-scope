@@ -46,7 +46,7 @@ One contract writer first; Android and desktop scaffolding may proceed independe
 
 ## G2 — safe first pixel, one real phone to Linux
 
-**Outcome:** explicitly start/stop an authenticated MJPEG stream with native desktop preview. Depends on G1 and approved D03/D04. **Status:** not started.
+**Outcome:** explicitly start/stop an authenticated MJPEG stream with native desktop preview. Depends on G1 and approved D03/D04. **Status:** G2.1/G2.2/G2.3/G2.4 verified complete; G2.5 blocked pending physical Android phone (evidence: [G2-first-pixel.md](evidence/G2-first-pixel.md)).
 
 | Task | Planned paths | Red → green acceptance |
 |---|---|---|
