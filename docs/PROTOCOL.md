@@ -2,7 +2,7 @@
 
 ## Status and authority
 
-[control-message.schema.json](../protocol/control-message.schema.json) currently validates only a permissive draft envelope. It does **not** validate per-message payloads, correlation, authentication, ranges or lifecycle semantics. It is preserved unchanged during replanning to avoid implying a frozen wire contract. G1 replaces it with typed variants plus cross-language fixtures before Android/Rust implementations diverge. The schema `$id` is an identifier, not proof of a hosted endpoint.
+G1 froze this contract: [control-message.schema.json](../protocol/control-message.schema.json) is now a discriminated per-type schema (safe-integer IDs, per-direction ID rules, typed payloads, the 12-code error taxonomy, fail-closed unknown fields/controls) with a shared 43-fixture corpus in `protocol/fixtures/` validated by Python, Rust and Kotlin consumers. The original permissive draft envelope is preserved in git history. Temporal lifecycle regressions (stop-timeout, reconnect generation isolation) and pairing/media trust vectors exist as declared fixtures; executable stop/reconnect timing harnesses land with the G2 session slice (fake monotonic clock per PROTOCOL.md). The schema `$id` is an identifier, not proof of a hosted endpoint.
 
 ## Transport and trust
 

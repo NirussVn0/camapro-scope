@@ -20,6 +20,11 @@ jobs:
         run: pip install -r protocol/requirements-test.txt
       - name: Contract suite
         run: python -m unittest discover -s protocol/tests -v
+      - name: Required test assets exist
+        run: |
+          test -f protocol/tests/test_contract.py
+          test -f desktop/src-tauri/tests/protocol_contract.rs
+          test -f android/app/src/test/java/app/camapro/scope/protocol/ProtocolContractTest.kt
 
   desktop-core:
     needs: protocol
@@ -69,6 +74,8 @@ jobs:
           java-version: 21
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+      - name: Install pinned SDK components
+        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0" > /tmp/sdkmanager.log 2>&1 || { tail -50 /tmp/sdkmanager.log; exit 1; }
       - name: Gradle wrapper checksum check
         run: grep -q "distributionSha256Sum" android/gradle/wrapper/gradle-wrapper.properties \
           || (echo "wrapper distribution must pin a sha256 checksum" && exit 1)

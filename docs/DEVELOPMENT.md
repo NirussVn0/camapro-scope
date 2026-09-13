@@ -2,14 +2,17 @@
 
 ## Current runnable checks
 
-There is no application source/toolchain configuration yet. Only JSON syntax and document/skill structural checks can run at this baseline. From repository root:
+G1 established the contract suite and build toolchains. From repository root:
 
 ```bash
-python -m json.tool protocol/control-message.schema.json > /dev/null
+python -m unittest discover -s protocol/tests -v   # after: python -m venv protocol/.venv && protocol/.venv/bin/pip install -r protocol/requirements-test.txt
+cd android && JAVA_HOME=~/Android/jdk/jdk-21.0.12.1+1 ANDROID_HOME=~/Android/Sdk ./gradlew lintDebug testDebugUnitTest assembleDebug
+cd desktop && pnpm install --frozen-lockfile --ignore-scripts && pnpm typecheck && pnpm build
+cd desktop/src-tauri && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 git status --short --branch
 ```
 
-`git diff --check` does not inspect untracked files. At the initial audit all authored files were untracked; use a captured baseline plus direct file validation for review, rather than reporting an empty Git diff as clean validation. JSON syntax success is not protocol semantics success.
+`git diff --check` does not inspect untracked files; use a captured baseline plus direct file validation for review. JSON syntax success is not protocol semantics success. Android toolchains live under `~/Android/` (SDK + Temurin JDK 21, home directory); CI provisions its own equivalents.
 
 ## Delivery loop
 
@@ -19,7 +22,7 @@ git status --short --branch
 4. Exercise the real integration. Use fakes for deterministic lifecycle tests, but label them; never present fake video as Camera2/device proof.
 5. Update affected canon and evidence; get independent review at each major gate. Lead verifies outputs, then changes roadmap status. No autonomous commit/push/release.
 
-## Future application commands (not runnable until G1 creates them)
+## Future application commands (established by G1; hardware gates still pending)
 
 G1 must pin tools/dependencies and establish these scripts. Run each from its specified directory and record actual exit status:
 

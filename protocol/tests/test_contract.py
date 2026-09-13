@@ -178,6 +178,34 @@ def semantics_decide(case):
         blob = json.dumps(case["messages"][0], separators=(",", ":"))
         return "reject" if len(blob.encode("utf-8")) > limit else "cache_replay"
 
+    if expect_hint in (
+        "pairing-secret-replay",
+        "pairing-secret-expired",
+        "unauthenticated-media-request",
+        "revoked-peer-control-connection",
+    ):
+        # Trust semantics: fail closed on replay/expiry/unauthenticated/revoked.
+        ctx = case.get("context", {})
+        if expect_hint == "pairing-secret-replay" and ctx.get("pairingState") == "consumed":
+            return "reject"
+        if expect_hint == "pairing-secret-expired" and ctx["clockMonotonicMs"] > ctx["secretExpiryMs"]:
+            return "reject"
+        if expect_hint == "unauthenticated-media-request" and ctx.get("mediaAuthorization") == "absent":
+            return "reject"
+        if expect_hint == "revoked-peer-control-connection" and ctx.get("peerRevoked"):
+            return "reject"
+        return "cache_replay"
+
+    if expect_hint == "delayed-event-after-stop":
+        payload = case["messages"][0]["payload"]
+        if payload["streamState"] != case["context"]["stateAfterStop"] and case["context"].get(
+            "activeConnectionGeneration"
+        ) == payload.get("connectionGeneration"):
+            # Same generation, but the event contradicts the acknowledged stop
+            # projection: a delayed optimistic event is not confirmed state.
+            return "ignore"
+        return "cache_replay"
+
     raise AssertionError(f"unknown semantic case {expect_hint}")
 
 

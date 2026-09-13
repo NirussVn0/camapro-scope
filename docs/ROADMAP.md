@@ -32,7 +32,7 @@ Read architecture, D03/D04/D06/D07/D08 and media-platform skill. Work in bounded
 
 ## G1 — executable contract and minimal build foundation
 
-**Outcome:** both sides agree before parallel implementation. Depends on G0. **Status:** code tasks complete — G1.1/G1.2/G1.3 (Android APK + desktop)/G1.4 (Rust + Gradle-run Kotlin parity)/G1.5 authored, all verified (evidence: [G1-contract-builds.md](evidence/G1-contract-builds.md)); gate exit awaits independent read-only review, then lead rerun.
+**Outcome:** both sides agree before parallel implementation. Depends on G0. **Status:** complete — G1.1/G1.2/G1.3/G1.4/G1.5 verified; independent review returned PASS WITH NOTES and lead reconciled all findings (evidence: [G1-contract-builds.md](evidence/G1-contract-builds.md)). Next: G2.
 
 One contract writer first; Android and desktop scaffolding may proceed independently only after schemas/fixtures are agreed.
 

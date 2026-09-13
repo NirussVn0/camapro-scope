@@ -76,48 +76,59 @@
       "expect": "invalid",
       "reason": "unsupported_version"
     },
-    "semantic/duplicate-id-changed-content.json": {
-      "caseExpectation": "reject",
+    "semantic/delayed-event-after-stop.json": {
       "expect": "semantic",
-      "reason": "invalid_payload"
+      "reason": "stale_generation"
     },
-    "semantic/duplicate-id-same-content.json": {
-      "caseExpectation": "cache_replay",
+    "semantic/duplicate-id-cache-hit.json": {
       "expect": "semantic",
       "reason": "duplicate_request"
     },
+    "semantic/duplicate-id-changed-content.json": {
+      "expect": "semantic",
+      "reason": "invalid_payload"
+    },
     "semantic/manual-exposure-not-atomic.json": {
-      "caseExpectation": "reject",
       "expect": "semantic",
       "reason": "invalid_payload"
     },
     "semantic/out-of-range-ev-steps.json": {
-      "caseExpectation": "reject",
       "expect": "semantic",
       "reason": "invalid_state"
     },
     "semantic/oversized-control-message.json": {
-      "caseExpectation": "reject",
       "expect": "semantic",
       "reason": "invalid_payload"
+    },
+    "semantic/pairing-secret-expired.json": {
+      "expect": "semantic",
+      "reason": "unauthenticated"
+    },
+    "semantic/pairing-secret-replay.json": {
+      "expect": "semantic",
+      "reason": "unauthenticated"
     },
     "semantic/partial-manual-exposure.json": {
-      "caseExpectation": "reject",
       "expect": "semantic",
       "reason": "invalid_payload"
     },
+    "semantic/revoked-peer-control-connection.json": {
+      "expect": "semantic",
+      "reason": "unauthenticated"
+    },
     "semantic/stale-capabilities-revision.json": {
-      "caseExpectation": "reject",
       "expect": "semantic",
       "reason": "stale_capabilities"
     },
     "semantic/stale-generation-event.json": {
-      "caseExpectation": "ignore",
       "expect": "semantic",
       "reason": "stale_generation"
     },
+    "semantic/unauthenticated-media-request.json": {
+      "expect": "semantic",
+      "reason": "unauthenticated"
+    },
     "semantic/wrong-direction-request.json": {
-      "caseExpectation": "reject",
       "expect": "semantic",
       "reason": "forbidden"
     },

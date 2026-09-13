@@ -69,6 +69,38 @@ object SemanticRules {
                 if (blob.size > MAX_CONTROL_MESSAGE_BYTES) "reject" else "cache_replay"
             }
 
+            "pairing-secret-replay", "pairing-secret-expired",
+            "unauthenticated-media-request", "revoked-peer-control-connection",
+            -> {
+                // Trust semantics: fail closed on replay/expiry/unauthenticated/revoked.
+                when {
+                    name == "pairing-secret-replay" &&
+                        context.optString("pairingState") == "consumed" -> "reject"
+
+                    name == "pairing-secret-expired" &&
+                        context.getLong("clockMonotonicMs") > context.getLong("secretExpiryMs") -> "reject"
+
+                    name == "unauthenticated-media-request" &&
+                        context.optString("mediaAuthorization") == "absent" -> "reject"
+
+                    name == "revoked-peer-control-connection" &&
+                        context.optBoolean("peerRevoked") -> "reject"
+
+                    else -> "cache_replay"
+                }
+            }
+
+            "delayed-event-after-stop" -> {
+                val payload = messages.getJSONObject(0).getJSONObject("payload")
+                val active = context.getLong("activeConnectionGeneration")
+                val gen = payload.getLong("connectionGeneration")
+                val state = payload.getString("streamState")
+                val afterStop = context.getString("stateAfterStop")
+                // Same generation, but the event contradicts the acknowledged
+                // stop projection: a delayed optimistic event is not state.
+                if (active == gen && state != afterStop) "ignore" else "cache_replay"
+            }
+
             else -> error("unknown semantic case: $name")
         }
     }
@@ -82,7 +114,7 @@ object SemanticRules {
         is JSONArray ->
             (0 until value.length()).joinToString(",", "[", "]") { canonical(value.get(it)) }
 
-        is String -> "\"$value\""
+        is String -> "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
         else -> value.toString()
     }
 

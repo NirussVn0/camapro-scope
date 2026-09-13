@@ -192,6 +192,49 @@ fn semantic_expect(case: &Map<String, Value>) -> &'static str {
                 "cache_replay"
             }
         }
+        "pairing-secret-replay"
+        | "pairing-secret-expired"
+        | "unauthenticated-media-request"
+        | "revoked-peer-control-connection" => {
+            // Trust semantics: fail closed on replay/expiry/unauthenticated/revoked.
+            match name {
+                "pairing-secret-replay" if ctx["pairingState"].as_str() == Some("consumed") => {
+                    "reject"
+                }
+                "pairing-secret-expired" => {
+                    let now = ctx["clockMonotonicMs"].as_u64().unwrap();
+                    let expiry = ctx["secretExpiryMs"].as_u64().unwrap();
+                    if now > expiry {
+                        "reject"
+                    } else {
+                        "cache_replay"
+                    }
+                }
+                "unauthenticated-media-request"
+                    if ctx["mediaAuthorization"].as_str() == Some("absent") =>
+                {
+                    "reject"
+                }
+                "revoked-peer-control-connection" if ctx["peerRevoked"].as_bool() == Some(true) => {
+                    "reject"
+                }
+                _ => "cache_replay",
+            }
+        }
+        "delayed-event-after-stop" => {
+            let payload = &messages[0]["payload"];
+            let active = ctx["activeConnectionGeneration"].as_u64();
+            let gen = payload["connectionGeneration"].as_u64();
+            let state = payload["streamState"].as_str().unwrap();
+            let after_stop = ctx["stateAfterStop"].as_str().unwrap();
+            if active == gen && state != after_stop {
+                // Same generation, but the event contradicts the acknowledged
+                // stop projection: a delayed optimistic event is not state.
+                "ignore"
+            } else {
+                "cache_replay"
+            }
+        }
         other => panic!("unknown semantic case: {}", other),
     }
 }
