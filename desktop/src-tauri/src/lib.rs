@@ -44,6 +44,33 @@ fn virtual_output_status(state: State<AppState>) -> Result<OutputState, String> 
     Ok(dispatcher.virtual_output_status())
 }
 
+/// Headless run of the production virtual-output path: spawn gst-launch,
+/// keep it running `secs` seconds, stop, release. Exit 0 = success.
+pub fn virtual_output_smoke(secs: u64) -> i32 {
+    use platform::linux::virtual_output::{GstLaunchSpawner, OutputState, VirtualOutputController};
+    let mut ctrl = VirtualOutputController::new(Box::new(GstLaunchSpawner));
+    match ctrl.start(DEFAULT_DEVICE) {
+        Ok(OutputState::Running) => {}
+        Ok(other) => {
+            eprintln!("unexpected state after start: {other:?}");
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("start failed: {e:?}");
+            return 1;
+        }
+    }
+    println!("virtual output running on {DEFAULT_DEVICE} for {secs}s");
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+    if !ctrl.is_running() {
+        eprintln!("gst-launch exited before the smoke window ended");
+        return 1;
+    }
+    ctrl.stop();
+    println!("virtual output stopped cleanly");
+    0
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dispatcher =
