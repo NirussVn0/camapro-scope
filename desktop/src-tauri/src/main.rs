@@ -11,5 +11,18 @@ fn main() {
             .unwrap_or(10);
         std::process::exit(camapro_scope_lib::virtual_output_smoke(secs));
     }
+    // Headless T2/T3 smoke: stream MJPEG from <host:port> with <token>.
+    if std::env::args().nth(1).as_deref() == Some("--preview-smoke") {
+        let args: Vec<String> = std::env::args().collect();
+        let secs: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(15);
+        let (addr, token) = match (args.get(2), args.get(3)) {
+            (Some(a), Some(t)) => (a.as_str(), t.as_str()),
+            _ => {
+                eprintln!("usage: --preview-smoke <host:port> <token> [secs]");
+                std::process::exit(2);
+            }
+        };
+        std::process::exit(camapro_scope_lib::preview_smoke(addr, token, secs));
+    }
     camapro_scope_lib::run()
 }
