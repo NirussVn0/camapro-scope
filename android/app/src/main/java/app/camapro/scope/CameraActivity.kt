@@ -35,7 +35,7 @@ class CameraActivity : Activity() {
     private var server: MjpegHttpServer? = null
     private var scheduler: ScheduledExecutorService? = null
     private var frameTask: ScheduledFuture<*>? = null
-    private val token: String = Random.nextLong(0x10000000, 0xFFFFFFF).toString(16)
+    private val token: String = Random.nextLong(0x10000000, 0xFFFFFFF0).toString(16)
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var statusText: TextView
