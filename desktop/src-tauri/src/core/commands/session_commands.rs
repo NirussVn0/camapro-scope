@@ -1,5 +1,8 @@
 use crate::core::session::{SessionController, SessionState};
 use crate::platform::linux::preview::NativePreviewSink;
+use crate::platform::linux::virtual_output::{
+    OutputState, VirtualOutputController, VirtualOutputError,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,11 +16,16 @@ pub enum SessionCommand {
 pub struct CommandDispatcher {
     session: SessionController,
     preview: NativePreviewSink,
+    virtual_output: VirtualOutputController,
 }
 
 impl CommandDispatcher {
     pub fn new(session: SessionController, preview: NativePreviewSink) -> Self {
-        Self { session, preview }
+        Self {
+            session,
+            preview,
+            virtual_output: VirtualOutputController::default(),
+        }
     }
 
     pub fn status(&self) -> SessionState {
@@ -30,6 +38,21 @@ impl CommandDispatcher {
 
     pub fn preview(&self) -> &NativePreviewSink {
         &self.preview
+    }
+
+    pub fn virtual_output_start(
+        &mut self,
+        device_path: &str,
+    ) -> Result<OutputState, VirtualOutputError> {
+        self.virtual_output.start(device_path)
+    }
+
+    pub fn virtual_output_stop(&mut self) {
+        self.virtual_output.stop();
+    }
+
+    pub fn virtual_output_status(&mut self) -> OutputState {
+        self.virtual_output.status()
     }
 
     pub fn on_peer_connected(&mut self, peer: &str, now_ms: u64) {
