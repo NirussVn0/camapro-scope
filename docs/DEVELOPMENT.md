@@ -26,33 +26,37 @@ git status --short --branch
 
 G1 must pin tools/dependencies and establish these scripts. Run each from its specified directory and record actual exit status:
 
-| Directory | Planned command | Checks |
-|---|---|---|
-| repository root | `python -m unittest discover -s protocol/tests -v` | fixture corpus after installing pinned `protocol/requirements-test.txt` in an isolated environment |
-| `android/` | `./gradlew lintDebug testDebugUnitTest assembleDebug` | lint + JVM tests + debug APK |
-| `desktop/src-tauri/` | `cargo fmt --all -- --check` | format |
-| `desktop/src-tauri/` | `cargo clippy --all-targets --locked -- -D warnings` | target-appropriate features; never blanket mutually-exclusive all-features |
-| `desktop/src-tauri/` | `cargo test --locked` | core/contract tests |
-| `desktop/` | `pnpm install --frozen-lockfile` | reproducible JS dependency install |
-| `desktop/` | `pnpm lint && pnpm typecheck && pnpm test && pnpm build` | controls UI; `test` must be non-watch |
-| `desktop/` | `pnpm tauri build` | full desktop/native packaging, not just Vite bundle |
+
+| Directory            | Planned command                                          | Checks                                                                                             |
+| -------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| repository root      | `python -m unittest discover -s protocol/tests -v`       | fixture corpus after installing pinned `protocol/requirements-test.txt` in an isolated environment |
+| `android/`           | `./gradlew lintDebug testDebugUnitTest assembleDebug`    | lint + JVM tests + debug APK                                                                       |
+| `desktop/src-tauri/` | `cargo fmt --all -- --check`                             | format                                                                                             |
+| `desktop/src-tauri/` | `cargo clippy --all-targets --locked -- -D warnings`     | target-appropriate features; never blanket mutually-exclusive all-features                         |
+| `desktop/src-tauri/` | `cargo test --locked`                                    | core/contract tests                                                                                |
+| `desktop/`           | `pnpm install --frozen-lockfile`                         | reproducible JS dependency install                                                                 |
+| `desktop/`           | `pnpm lint && pnpm typecheck && pnpm test && pnpm build` | controls UI; `test` must be non-watch                                                              |
+| `desktop/`           | `pnpm tauri build`                                       | full desktop/native packaging, not just Vite bundle                                                |
+
 
 Android instrumentation/device scenarios are additional to JVM tests. Windows gets its own target build/OS execution. CI should fail when required test suites are absent; do not mark a skipped hardware gate PASS. Unit/contract CI and hardware acceptance are distinct statuses.
 
 ## Acceptance matrix
 
-| Layer | Automated evidence | Integration/hardware evidence |
-|---|---|---|
-| Protocol | every message + negative fixtures, Kotlin/Rust parity, units, direction, duplicate semantics | authenticated cross-runtime exchange |
-| Session | fake clock and fault-injected transition matrix | kill desktop, interrupt Wi-Fi, revoke permission, stop notification |
-| Trust | wrong fingerprint, expired/reused secret, revocation, unauthenticated media, log redaction | actual pairing and secure persistence on reference OS/device |
-| Media | bounded parser/queues, corrupt data, slow sink, generation isolation | real Camera2 → native surface/output; negotiated vs delivered mode |
-| Platform | port-level fake tests; target build | OBS/browser actual frames, permissions, resize, install/uninstall |
-| UI | capability-disabled states, errors, start/stop actions | no raw-frame IPC; clear Ready/Streaming/Reconnecting/degraded states |
+
+| Layer    | Automated evidence                                                                           | Integration/hardware evidence                                        |
+| -------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Protocol | every message + negative fixtures, Kotlin/Rust parity, units, direction, duplicate semantics | authenticated cross-runtime exchange                                 |
+| Session  | fake clock and fault-injected transition matrix                                              | kill desktop, interrupt Wi-Fi, revoke permission, stop notification  |
+| Trust    | wrong fingerprint, expired/reused secret, revocation, unauthenticated media, log redaction   | actual pairing and secure persistence on reference OS/device         |
+| Media    | bounded parser/queues, corrupt data, slow sink, generation isolation                         | real Camera2 → native surface/output; negotiated vs delivered mode   |
+| Platform | port-level fake tests; target build                                                          | OBS/browser actual frames, permissions, resize, install/uninstall    |
+| UI       | capability-disabled states, errors, start/stop actions                                       | no raw-frame IPC; clear Ready/Streaming/Reconnecting/degraded states |
+
 
 ## Performance measurement
 
-G0 fixes numerical pass thresholds and reference hardware before G5. Start with 720p30 to retire integration risk; 1080p30 / <250 ms / 30 minutes remain Linux release goals. Production 1080p60 / <120 ms is exploratory until measured.
+G0 fixes numerical pass thresholds and reference hardware before G5. Start with 720p30 to retire integration risk; 1080p30 / &lt;250 ms / 30 minutes remain Linux release goals. Production 1080p60 / &lt;120 ms is exploratory until measured.
 
 Record sender and receiver frame counters, delivered FPS distribution, drops, queue high-water marks, CPU and periodic RSS for both processes, and thermal/battery state. Define warm-up, sample interval, baseline and allowed RSS slope/peak before a run. “No growth” is not established by two screenshots or a stable short sample. Report stalls and disconnections, not only averages.
 
