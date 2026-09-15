@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Panel } from "@/components/Panel";
 import { StageFrame } from "@/components/StageFrame";
 import { Button } from "@/components/ui/button";
@@ -50,6 +51,7 @@ function Label({ children }: { children: React.ReactNode }) {
 export function App() {
   const [port, setPort] = useState(8100);
   const [token, setToken] = useState("");
+  const [qrPayload, setQrPayload] = useState<string | null>(null);
   const [camera, setCamera] = useState("back");
   const [orientation, setOrientation] = useState("landscape");
   const [resolution, setResolution] = useState("1920x1080");
@@ -224,6 +226,24 @@ export function App() {
               </Button>
             )}
             {previewError ? <p className="text-[#f87171] text-xs whitespace-pre-wrap">{previewError}</p> : null}
+            <button
+              onClick={async () => {
+                try {
+                  const p = await invoke("generate_pairing_qr");
+                  setQrPayload(JSON.stringify(p, null, 2));
+                } catch (e) {
+                  setQrPayload(String(e));
+                }
+              }}
+              className="w-full rounded-lg border border-white/10 px-2 py-1.5 text-xs text-[#94a3b8] hover:bg-white/5 hover:text-[#f5f7fa]"
+            >
+              Pair via QR (structural prep)
+            </button>
+            {qrPayload ? (
+              <pre className="max-h-24 overflow-auto rounded-lg bg-black/40 p-2 font-mono text-[10px] text-[#94a3b8]">
+                {qrPayload}
+              </pre>
+            ) : null}
           </Panel>
         </aside>
 

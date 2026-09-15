@@ -86,6 +86,27 @@ fn camera_set(_state: State<AppState>, payload: CameraSetPayload) -> Result<(), 
     Ok(())
 }
 
+/// G4 structural prep: generate a QR pairing payload per D03/PROTOCOL.md.
+/// Returns the JSON-serializable payload; actual QR visual rendering deferred.
+/// ponytail: no secure storage or TLS pinning yet; add when physical phone available.
+#[tauri::command]
+fn generate_pairing_qr() -> Result<serde_json::Value, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as u64;
+    // Placeholder fingerprint + secret; real impl uses platform KeyStore + rustls.
+    let payload = serde_json::json!({
+        "version": 1,
+        "endpoint_hint": "ws://192.168.1.100:9443",
+        "peer_fingerprint_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "secret": format!("{:016x}", now_ms),
+        "expires_at_ms": now_ms + 300_000 // 5 min
+    });
+    Ok(payload)
+}
+
 /// Headless T2 preview smoke: stream from `host:port` with `token`, pump
 /// frames through the waylandsink pipeline for `secs`, exit 0 only if at
 /// least one frame flowed. Prints frame count + fps.
@@ -163,7 +184,8 @@ pub fn run() {
             preview_start,
             preview_stop,
             preview_status,
-            camera_set
+            camera_set,
+            generate_pairing_qr
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
