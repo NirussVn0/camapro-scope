@@ -5,7 +5,7 @@ export function Panel({ className, ...props }: React.ComponentProps<typeof Card>
   return (
     <Card
       className={cn(
-        "glass-panel rounded-2xl border border-white/10 bg-white/5 shadow-none backdrop-blur-xl hover:bg-white/[0.08] dark",
+        "glass-panel rounded-xl border border-white/8 bg-[#101826]/72 shadow-sm shadow-black/30 backdrop-blur-[16px]",
         className,
       )}
       {...props}
