@@ -42,7 +42,7 @@ export function App() {
       </header>
 
       {/* Invariant D06: native preview renders directly to the container surface; raw frames never pass through React */}
-      <StageFrame streaming={streaming} />
+      <StageFrame streaming={previewActive} fps={`${previewFrames} khung`} />
 
       <Panel className="flex flex-wrap items-center gap-3 p-4">
         <Button onClick={handleStart} disabled={sessionState !== "Ready"}>
@@ -56,7 +56,14 @@ export function App() {
             Kết nối lại điện thoại
           </Button>
         ) : (
-          <Button onClick={handleDisconnect} variant="outline">
+          <Button
+            onClick={() => {
+              handleDisconnect();
+              // One session authority: dropping the phone must drop the stream too.
+              if (previewActive) void stopPreview();
+            }}
+            variant="outline"
+          >
             Ngắt kết nối
           </Button>
         )}
@@ -77,6 +84,8 @@ export function App() {
       <Panel className="flex flex-wrap items-center gap-3 p-4">
         <input
           type="number"
+          min={1}
+          max={65535}
           value={port}
           onChange={(e) => setPort(Number(e.target.value) || 8100)}
           aria-label="Cổng stream"
@@ -95,7 +104,7 @@ export function App() {
             Dừng preview
           </Button>
         ) : (
-          <Button onClick={() => void startPreview(port, token)} disabled={previewBusy}>
+          <Button onClick={() => void startPreview(port, token)} disabled={previewBusy || token.length === 0}>
             Xem stream
           </Button>
         )}

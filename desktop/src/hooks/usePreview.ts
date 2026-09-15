@@ -9,6 +9,14 @@ export function usePreview() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Teardown on unmount: stop the stream + gst pipeline, no orphans.
+  useEffect(
+    () => () => {
+      void invoke("preview_stop").catch(() => {});
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!active) return;
     const t = setInterval(async () => {

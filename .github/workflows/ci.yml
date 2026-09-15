@@ -52,7 +52,7 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Typecheck + bundle
         working-directory: desktop
-        run: pnpm typecheck && pnpm build
+        run: pnpm typecheck && pnpm test && pnpm build
       - name: Rust format
         working-directory: desktop/src-tauri
         run: cargo fmt --all -- --check
