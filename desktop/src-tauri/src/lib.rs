@@ -1,7 +1,7 @@
 pub mod core;
 pub mod platform;
 
-use core::commands::CommandDispatcher;
+use core::commands::{CameraSetPayload, CommandDispatcher};
 use core::session::SessionController;
 use platform::linux::preview::NativePreviewSink;
 use platform::linux::virtual_output::{OutputState, VirtualOutputError, DEFAULT_DEVICE};
@@ -71,6 +71,19 @@ fn preview_status(state: State<AppState>) -> Result<serde_json::Value, String> {
         "active": dispatcher.preview_active(),
         "frames": dispatcher.preview_frames(),
     }))
+}
+
+/// G4 structural prep: accepts typed camera.set payload per protocol schema.
+/// Returns Ok but does nothing until WSS transport + Android handler exist.
+/// ponytail: inert stub; wire when physical phone available.
+#[tauri::command]
+fn camera_set(_state: State<AppState>, payload: CameraSetPayload) -> Result<(), String> {
+    // Validate payload shape (serde already did); log for future wiring.
+    eprintln!(
+        "camera.set received (inert): camera={} rev={} changes={}",
+        payload.camera_id, payload.capability_revision, payload.changes
+    );
+    Ok(())
 }
 
 /// Headless T2 preview smoke: stream from `host:port` with `token`, pump
@@ -149,7 +162,8 @@ pub fn run() {
             virtual_output_status,
             preview_start,
             preview_stop,
-            preview_status
+            preview_status,
+            camera_set
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

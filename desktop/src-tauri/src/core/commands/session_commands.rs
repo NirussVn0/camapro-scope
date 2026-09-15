@@ -20,6 +20,18 @@ pub enum SessionCommand {
     Stop,
 }
 
+/// G4 structural prep: typed camera control payload per protocol schema.
+/// Inert until Android side implements camera.set handler over WSS.
+/// ponytail: no wire transport yet; add when physical phone available.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CameraSetPayload {
+    #[serde(rename = "cameraId")]
+    pub camera_id: String,
+    #[serde(rename = "capabilityRevision")]
+    pub capability_revision: u32,
+    pub changes: serde_json::Value,
+}
+
 /// Central command dispatcher for desktop UI and future CLI.
 /// Invariant D05: One desktop command authority; no parallel control paths.
 pub struct CommandDispatcher {
