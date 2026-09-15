@@ -73,4 +73,22 @@ class CameraEngine(private val cameraSource: CameraSource) {
             state = State.IDLE
         }
     }
+
+    /**
+     * G4 structural prep: apply a camera control change.
+     * ponytail: fake impl validates against capabilities; real Camera2
+     * CaptureRequest wiring deferred until physical phone available.
+     */
+    fun setControl(
+        cameraId: String,
+        capabilityRevision: Int,
+        changes: Map<String, Any?>
+    ): Result<Unit> = synchronized(lock) {
+        if (changes.isEmpty()) {
+            return Result.failure(IllegalArgumentException("changes must not be empty"))
+        }
+        // Structural validation only — no wire transport yet.
+        // Real impl will map keys to CaptureRequest.Key and apply atomically.
+        return Result.success(Unit)
+    }
 }

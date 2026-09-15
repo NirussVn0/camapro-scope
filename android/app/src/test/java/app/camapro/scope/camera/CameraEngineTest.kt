@@ -145,4 +145,16 @@ class CameraEngineTest {
         assertEquals(1, fakeSource.openCount.get())
         assertEquals(1, fakeSource.closeCount.get())
     }
+
+    @Test
+    fun `setControl rejects empty changes`() {
+        val result = engine.setControl("0", 3, emptyMap())
+        assertTrue(result.isFailure)
+    }
+
+    @Test
+    fun `setControl accepts valid changes structurally`() {
+        val result = engine.setControl("0", 3, mapOf("exposureCompensationSteps" to 2))
+        assertTrue(result.isSuccess)
+    }
 }
