@@ -4,11 +4,12 @@ import { Panel } from "@/components/Panel";
 import { StageFrame } from "@/components/StageFrame";
 import { Button } from "@/components/ui/button";
 import { useSession } from "@/hooks/useSession";
-import { useVirtualOutput } from "@/hooks/useVirtualOutput";
 import { usePreview } from "@/hooks/usePreview";
-import { Columns2Icon, PowerIcon, Rows3Icon, VideoIcon } from "lucide-react";
+import { useVirtualOutput } from "@/hooks/useVirtualOutput";
 import { cn } from "@/lib/utils";
 import logoUrl from "@/assets/logo.png";
+import { generateQrSvg } from "@/lib/qr";
+import { Columns2Icon, PowerIcon, Rows3Icon, VideoIcon } from "lucide-react";
 
 const selectCls =
   "w-full appearance-none rounded-lg border border-white/10 bg-[#0d131d] px-3 py-1.5 text-sm text-[#f5f7fa] outline-none focus-visible:ring-2 focus-visible:ring-[#60a5fa]/50";
@@ -240,9 +241,13 @@ export function App() {
               Pair via QR (structural prep)
             </button>
             {qrPayload ? (
-              <pre className="max-h-24 overflow-auto rounded-lg bg-black/40 p-2 font-mono text-[10px] text-[#94a3b8]">
-                {qrPayload}
-              </pre>
+              <div className="flex flex-col items-center gap-1">
+                <div
+                  className="rounded-lg bg-white p-2"
+                  dangerouslySetInnerHTML={{ __html: generateQrSvg(qrPayload, 160) }}
+                />
+                <p className="text-[10px] text-[#94a3b8]">Scan with phone camera</p>
+              </div>
             ) : null}
           </Panel>
         </aside>
