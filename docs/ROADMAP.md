@@ -60,7 +60,7 @@ One contract writer first; Android and desktop scaffolding may proceed independe
 
 ## G3 — Linux virtual output
 
-**Outcome:** same decoded stream reaches OBS and browser camera capture. **Status:** not started.
+**Outcome:** same decoded stream reaches OBS and browser camera capture. **Status:** G3.1/G3.2 complete (virtual camera sink + gst-launch output controller + headless smoke verified); browser consumer blocked (Chrome Linux can't enumerate v4l2loopback without MMAP).
 
 - Create `desktop/src-tauri/src/platform/linux/virtual_camera.rs`; test output port independently with a fake sink before attaching user-provisioned v4l2loopback.
 - Negotiate size/FPS/pixel format and color/rotation/aspect semantics; test missing/busy device and permissions without auto-elevation.
@@ -71,7 +71,7 @@ One contract writer first; Android and desktop scaffolding may proceed independe
 
 ## G4 — controls and recovery
 
-**Outcome:** trustworthy capability-driven live controls and recovery. **Status:** not started.
+**Outcome:** trustworthy capability-driven live controls and recovery. **Status:** structural prep complete (typed camera_set command + Android setControl interface + QR payload generation); wire transport blocked pending physical phone + WSS + TLS pinning.
 
 - Extend the G2 command dispatch in `desktop/src-tauri/src/core/commands/` with live camera controls; do not introduce a second UI command path. Add Android camera control validation.
 - Tests first: EV rational steps, opaque lens IDs, focus/manual support, AE-off ISO+shutter transaction, unsupported values, camera capability refresh, requested vs applied state.
