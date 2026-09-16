@@ -47,4 +47,9 @@ Thumbs.db
 # Agent local runtime data
 .hermes/
 .opencode/
-camapro-scope-0.1.0-linux-x86_64.tar.gz
+# Release artifacts and portable bundles
+dist/
+camapro-scope-*.tar.gz
+camapro-scope-*/
+*.apk
+
