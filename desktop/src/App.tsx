@@ -69,6 +69,12 @@ export function App() {
   const [pairingSuccess, setPairingSuccess] = useState<string | null>(null);
   const [checkingPhone, setCheckingPhone] = useState(false);
   const [phoneOnlineStatus, setPhoneOnlineStatus] = useState<string | null>(null);
+  const [netDiag, setNetDiag] = useState<{
+    vpn_active: boolean;
+    vpn_service: string | null;
+    lan_blocked_hint: string | null;
+    candidate_ips: string[];
+  } | null>(null);
 
   const [camera, setCamera] = useState("back");
   const [orientation, setOrientation] = useState("landscape");
@@ -79,8 +85,16 @@ export function App() {
   const [infoOpen, setInfoOpen] = useState(true);
 
   const { sessionState } = useSession();
-  const { outputState, error: outputError, busy: outputBusy, toggle: toggleOutput } =
-    useVirtualOutput();
+  const {
+    outputState,
+    devices: videoDevices,
+    selectedDevice,
+    setSelectedDevice,
+    error: outputError,
+    busy: outputBusy,
+    toggle: toggleOutput,
+  } = useVirtualOutput();
+
   const {
     active: previewActive,
     frames: previewFrames,
@@ -89,6 +103,13 @@ export function App() {
     start: startPreview,
     stop: stopPreview,
   } = usePreview();
+
+  // Network diagnostics on startup
+  useEffect(() => {
+    invoke<any>("check_network_environment")
+      .then(setNetDiag)
+      .catch((e) => console.error("Network check failed:", e));
+  }, []);
 
   // Listen for real 2-way pairing events from desktop's pairing listener
   useEffect(() => {
@@ -179,7 +200,7 @@ export function App() {
     try {
       const res = await invoke<{ online: boolean }>("check_phone_status", { host, port });
       if (res.online) {
-        setPhoneOnlineStatus("✓ Phone is online");
+        setPhoneOnlineStatus("✓ Phone is reachable");
       }
     } catch (e) {
       setPhoneOnlineStatus(`❌ ${String(e)}`);
@@ -288,15 +309,51 @@ export function App() {
           </button>
         </Panel>
 
-        {/* Output */}
+        {/* Output Panel with Auto-detected Virtual Devices */}
         <Panel className="flex flex-col gap-2 p-2.5">
-          <Label>Output</Label>
+          <div className="flex items-center justify-between">
+            <Label>Virtual Camera</Label>
+            {videoDevices.length > 0 ? (
+              <span className="text-[10px] text-[#4ade80] font-mono">
+                {selectedDevice || videoDevices[0].path}
+              </span>
+            ) : null}
+          </div>
+
+          {videoDevices.length > 1 ? (
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] text-[#94a3b8]" htmlFor="vdev">
+                Output Device
+              </label>
+              <select
+                id="vdev"
+                className={selectCls}
+                value={selectedDevice}
+                onChange={(e) => setSelectedDevice(e.target.value)}
+              >
+                {videoDevices.map((d) => (
+                  <option key={d.path} value={d.path}>
+                    {d.path} ({d.name})
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : videoDevices.length === 1 ? (
+            <div className="text-[10px] text-[#94a3b8] truncate">
+              Device: <span className="font-mono text-[#f5f7fa]">{videoDevices[0].path}</span> ({videoDevices[0].name})
+            </div>
+          ) : null}
+
           <Button
-            onClick={toggleOutput}
+            onClick={() => toggleOutput(selectedDevice)}
             disabled={outputBusy}
             size="sm"
             variant={outputState === "Running" ? "default" : "outline"}
-            className={cn("w-full gap-1.5 text-xs", outputState === "Running" && "bg-[#4ade80]/15 border-[#4ade80]/40 text-[#4ade80] hover:bg-[#4ade80]/20")}
+            className={cn(
+              "w-full gap-1.5 text-xs",
+              outputState === "Running" &&
+                "bg-[#4ade80]/15 border-[#4ade80]/40 text-[#4ade80] hover:bg-[#4ade80]/20",
+            )}
           >
             <PowerIcon className="size-3.5" />
             Virtual camera: {outputState === "Running" ? "On" : "Off"}
@@ -333,6 +390,17 @@ export function App() {
               </button>
             </div>
           </div>
+
+          {/* VPN Firewall notice if local LAN traffic is blocked by NordVPN */}
+          {netDiag?.lan_blocked_hint && (
+            <div className="rounded-lg border border-[#f59e0b]/40 bg-[#f59e0b]/10 p-2 text-[11px] text-[#f59e0b]">
+              <div className="font-semibold flex items-center gap-1">
+                <span>⚠️ VPN Blocking Local LAN</span>
+              </div>
+              <p className="mt-0.5 opacity-90 leading-tight">{netDiag.lan_blocked_hint}</p>
+            </div>
+          )}
+
           <div className="flex flex-col gap-1.5">
             <div className="flex gap-1.5">
               <input
@@ -366,6 +434,32 @@ export function App() {
               className="w-full rounded-lg border border-white/10 bg-[#0d131d] px-2 py-1 font-mono text-xs text-[#f5f7fa] outline-none focus-visible:ring-2 focus-visible:ring-[#60a5fa]/50"
             />
           </div>
+
+          {/* Quick connection shortcuts */}
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => {
+                setHost("127.0.0.1");
+                setPort(8100);
+              }}
+              className="flex-1 rounded border border-white/10 px-1.5 py-1 text-[10px] text-[#94a3b8] hover:bg-white/5 hover:text-white transition-colors"
+              title="USB Mode: run 'adb forward tcp:8100 tcp:8100' for zero-lag wired stream"
+            >
+              🔌 Use USB (ADB)
+            </button>
+            {netDiag?.candidate_ips && netDiag.candidate_ips.filter((ip) => ip !== "127.0.0.1").length > 0 && (
+              <button
+                onClick={() => {
+                  const lanIp = netDiag.candidate_ips.find((ip) => ip.startsWith("192.168.")) || netDiag.candidate_ips[0];
+                  if (lanIp) setHost(lanIp);
+                }}
+                className="flex-1 rounded border border-white/10 px-1.5 py-1 text-[10px] text-[#94a3b8] hover:bg-white/5 hover:text-white transition-colors"
+              >
+                📶 Use LAN IP
+              </button>
+            )}
+          </div>
+
           {phoneOnlineStatus ? (
             <p className={cn("text-[11px]", phoneOnlineStatus.startsWith("✓") ? "text-[#4ade80]" : "text-[#f87171]")}>
               {phoneOnlineStatus}

@@ -11,6 +11,80 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 
 pub const DEFAULT_DEVICE: &str = "/dev/video0";
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct VideoDeviceInfo {
+    pub path: String,
+    pub name: String,
+    pub is_loopback: bool,
+}
+
+/// Detects all video capture/loopback devices in /sys/class/video4linux.
+pub fn detect_video_devices() -> Vec<VideoDeviceInfo> {
+    let mut devices = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if !file_name.starts_with("video") {
+                continue;
+            }
+            let dev_path = format!("/dev/{file_name}");
+            if !std::path::Path::new(&dev_path).exists() {
+                continue;
+            }
+            let name_file = entry.path().join("name");
+            let name = std::fs::read_to_string(&name_file)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| file_name.clone());
+
+            let is_loopback = if let Ok(target) = std::fs::read_link(entry.path()) {
+                let target_str = target.to_string_lossy();
+                target_str.contains("devices/virtual")
+                    || name.to_lowercase().contains("loopback")
+                    || name.to_lowercase().contains("virtual")
+                    || name.to_lowercase().contains("phone")
+                    || name.to_lowercase().contains("camapro")
+            } else {
+                name.to_lowercase().contains("loopback")
+                    || name.to_lowercase().contains("virtual")
+            };
+
+            devices.push(VideoDeviceInfo {
+                path: dev_path,
+                name,
+                is_loopback,
+            });
+        }
+    }
+
+    // Sort loopback devices first, with phone/camapro prioritized
+    devices.sort_by(|a, b| {
+        let a_score = (if a.is_loopback { 10 } else { 0 })
+            + (if a.name.to_lowercase().contains("phone") || a.name.to_lowercase().contains("camapro") {
+                5
+            } else {
+                0
+            });
+        let b_score = (if b.is_loopback { 10 } else { 0 })
+            + (if b.name.to_lowercase().contains("phone") || b.name.to_lowercase().contains("camapro") {
+                5
+            } else {
+                0
+            });
+        b_score.cmp(&a_score)
+    });
+
+    devices
+}
+
+pub fn default_video_device() -> String {
+    let devices = detect_video_devices();
+    if let Some(first) = devices.first() {
+        first.path.clone()
+    } else {
+        DEFAULT_DEVICE.to_string()
+    }
+}
+
 /// Exact host remediation for a missing loopback device. Reported, never auto-run.
 pub const DEVICE_REMEDIATION: &str =
     "sudo modprobe v4l2loopback devices=1 video_label=\"Camapro Scope\" card_label=\"Camapro Scope Virtual Camera\"";

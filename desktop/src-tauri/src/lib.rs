@@ -5,7 +5,10 @@ use core::commands::{CameraSetPayload, CommandDispatcher};
 use core::control::PairingServer;
 use core::session::SessionController;
 use platform::linux::preview::NativePreviewSink;
-use platform::linux::virtual_output::{OutputState, VirtualOutputError, DEFAULT_DEVICE};
+use platform::linux::virtual_output::{
+    default_video_device, detect_video_devices, OutputState, VideoDeviceInfo, VirtualOutputError,
+    DEFAULT_DEVICE,
+};
 use std::sync::Mutex;
 use tauri::State;
 
@@ -15,12 +18,17 @@ struct AppState(Mutex<CommandDispatcher>);
 struct PairingServerState(PairingServer);
 
 #[tauri::command]
+fn get_video_devices() -> Vec<VideoDeviceInfo> {
+    detect_video_devices()
+}
+
+#[tauri::command]
 fn virtual_output_start(
     state: State<AppState>,
     device_path: Option<String>,
 ) -> Result<OutputState, String> {
     let mut dispatcher = state.0.lock().map_err(|_| "state poisoned")?;
-    let path = device_path.unwrap_or_else(|| DEFAULT_DEVICE.to_string());
+    let path = device_path.unwrap_or_else(default_video_device);
     dispatcher
         .virtual_output_start(&path)
         .map_err(|e| match e {
@@ -103,6 +111,47 @@ fn check_phone_status(host: String, port: u16) -> Result<serde_json::Value, Stri
         Ok(serde_json::json!({ "online": true, "host": host, "port": port }))
     } else {
         Err(format!("Phone returned unexpected response: {resp}"))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NetworkDiagnostic {
+    pub vpn_active: bool,
+    pub vpn_service: Option<String>,
+    pub lan_blocked_hint: Option<String>,
+    pub candidate_ips: Vec<String>,
+}
+
+#[tauri::command]
+fn check_network_environment() -> NetworkDiagnostic {
+    let mut vpn_active = false;
+    let mut vpn_service = None;
+    let mut lan_blocked_hint = None;
+
+    if let Ok(output) = std::process::Command::new("nordvpn").arg("status").output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.contains("Status: Connected") {
+            vpn_active = true;
+            vpn_service = Some("NordVPN".to_string());
+            if let Ok(set_out) = std::process::Command::new("nordvpn").arg("settings").output() {
+                let s_text = String::from_utf8_lossy(&set_out.stdout);
+                if s_text.contains("LAN Discovery: disabled") {
+                    lan_blocked_hint = Some(
+                        "NordVPN has LAN Discovery disabled (blocks local Wi-Fi). Run 'nordvpn set lan-discovery on' in terminal or use USB cable."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    let candidate_ips = PairingServer::get_candidate_ips();
+
+    NetworkDiagnostic {
+        vpn_active,
+        vpn_service,
+        lan_blocked_hint,
+        candidate_ips,
     }
 }
 
@@ -209,7 +258,9 @@ pub fn run() {
             preview_status,
             camera_set,
             generate_pairing_qr,
-            check_phone_status
+            check_phone_status,
+            get_video_devices,
+            check_network_environment
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -77,7 +77,7 @@ object NetworkHelper {
                 interfaceName = "lo",
                 ip = "127.0.0.1",
                 type = EndpointType.LOOPBACK,
-                streamUrl = "http://127.0.0.1:18100/stream?token=$token"
+                streamUrl = "http://127.0.0.1:$port/stream?token=$token"
             )
         )
 
