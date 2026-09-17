@@ -26,7 +26,8 @@ import java.nio.charset.StandardCharsets.US_ASCII
 class MjpegHttpServer(
     private val frameSupplier: () -> ByteArray?,
     private val token: String,
-    requestedPort: Int = DEFAULT_PORT
+    requestedPort: Int = DEFAULT_PORT,
+    private val bindAddress: String = "0.0.0.0"
 ) {
     private val bindPort = requestedPort
     companion object {
@@ -57,7 +58,7 @@ class MjpegHttpServer(
     @Synchronized
     fun start() {
         if (running) return
-        val ss = ServerSocket(bindPort, 8, InetAddress.getByName("127.0.0.1"))
+        val ss = ServerSocket(bindPort, 8, InetAddress.getByName(bindAddress))
         serverSocket = ss
         running = true
         thread = Thread({ acceptLoop(ss) }, "mjpeg-http-accept").apply {
@@ -109,13 +110,37 @@ class MjpegHttpServer(
         val lines = headerText.split("\r\n")
         val requestLine = lines.firstOrNull()?.split(" ") ?: return
         val method = requestLine.getOrNull(0)
-        val path = requestLine.getOrNull(1)
-        val requestToken = headersValue(lines, TOKEN_HEADER)
+        val rawUri = requestLine.getOrNull(1) ?: ""
+        val (path, query) = if (rawUri.contains("?")) {
+            val idx = rawUri.indexOf("?")
+            rawUri.substring(0, idx) to rawUri.substring(idx + 1)
+        } else {
+            rawUri to ""
+        }
+
+        if (method == "GET" && path == "/status") {
+            val json = "{\"status\":\"ok\",\"service\":\"camapro-scope\",\"port\":$port}\r\n"
+            val body = json.toByteArray(US_ASCII)
+            val res = "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Access-Control-Allow-Origin: *\r\n" +
+                    "Content-Length: ${body.size}\r\n" +
+                    "Connection: close\r\n\r\n"
+            val out = sock.getOutputStream()
+            out.write(res.toByteArray(US_ASCII))
+            out.write(body)
+            out.flush()
+            return
+        }
 
         if (method != "GET" || path != "/stream") {
             respondSimple(sock, input, "404 Not Found")
             return
         }
+
+        val queryToken = query.split("&").firstOrNull { it.startsWith("token=") }?.removePrefix("token=")
+        val requestToken = headersValue(lines, TOKEN_HEADER) ?: queryToken
+
         if (requestToken != token) {
             respondSimple(sock, input, "401 Unauthorized")
             return

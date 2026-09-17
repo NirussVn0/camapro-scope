@@ -1,7 +1,12 @@
 package app.camapro.scope
 
-import android.app.Activity
+import android.Manifest
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -19,12 +24,22 @@ import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import app.camapro.scope.camera.Camera2Source
+import app.camapro.scope.network.NetworkHelper
+import app.camapro.scope.service.CameraStreamService
 import app.camapro.scope.transport.BoundedFrameQueue
 import app.camapro.scope.transport.MjpegHttpServer
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -33,23 +48,24 @@ import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
 /**
- * Dev/demo screen per the mobile brief: black disconnected screen, floating
- * round button opening a compact bottom sheet (connection / token / display
- * radios / stop). Synthetic 2fps JPEG producer -> BoundedFrameQueue ->
- * MjpegHttpServer on 127.0.0.1:8100. Server behavior unchanged from the
- * pre-restyle version; only the chrome is new.
- *
- * ponytail: frames are a timestamped bitmap, not camera output; swap producer
- * for CameraEngine.onFrame -> queue.enqueue when the camera slice lands.
- * No glass blur (pre-Android-12 safe): solid #0F141E sheet + hairline stroke.
+ * Main Mobile Controller for Camapro Scope:
+ * - Real Camera2 hardware acquisition via Camera2Source (1080p ISP JPEG).
+ * - Graceful fallback to synthetic frame generator if camera unavailable or denied.
+ * - Multi-network binding (Wi-Fi LAN, Tailscale VPN, ADB Loopback) via MjpegHttpServer.
+ * - Foreground Service (CameraStreamService) to keep stream alive when screen is locked.
+ * - Instant desktop QR pairing via QrScanActivity and stream QR sharing via ZXing.
+ * - Minimalist black AMOLED UI with collapsible bottom sheet.
  */
-class CameraActivity : Activity() {
+class CameraActivity : ComponentActivity() {
 
     private val queue = BoundedFrameQueue()
     private var server: MjpegHttpServer? = null
+    private var cameraSource: Camera2Source? = null
     private var scheduler: ScheduledExecutorService? = null
     private var frameTask: ScheduledFuture<*>? = null
-    private val token: String = Random.nextLong(0x10000000, 0xFFFFFFF0).toString(16)
+    private var isUsingRealCamera = false
+
+    private var token: String = Random.nextLong(0x10000000, 0xFFFFFFF0).toString(16)
     private val mainHandler = Handler(Looper.getMainLooper())
     private var displayMode: ScopeUi.DisplayMode = ScopeUi.DEFAULT_DISPLAY_MODE
 
@@ -58,9 +74,32 @@ class CameraActivity : Activity() {
     private lateinit var sheet: View
     private lateinit var sheetStatus: TextView
     private lateinit var tokenRow: TextView
+    private lateinit var endpointsContainer: LinearLayout
     private lateinit var previewCaption: TextView
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
+
+    private val cameraPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            startStreamingInternal(preferRealCamera = true)
+        } else {
+            Toast.makeText(this, "Camera permission denied; using synthetic feed", Toast.LENGTH_LONG).show()
+            startStreamingInternal(preferRealCamera = false)
+        }
+    }
+
+    private val qrScanLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val payload = result.data?.getStringExtra(QrScanActivity.EXTRA_QR_PAYLOAD)
+            if (payload != null) {
+                handleScannedDesktopPayload(payload)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,14 +108,20 @@ class CameraActivity : Activity() {
 
         // Centered identity block: app name + dot/word status + hint.
         centerStatus = TextView(this).apply { textSize = 15f; setTextColor(Color.WHITE) }
-        centerHint = TextView(this).apply { textSize = 13f; setTextColor(Color.parseColor("#94A3B8")); gravity = Gravity.CENTER }
+        centerHint = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.parseColor("#94A3B8"))
+            gravity = Gravity.CENTER
+            setPadding(0, dp(6), 0, 0)
+        }
+
         root.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(dp(24), dp(24), dp(24), dp(24))
             addView(TextView(this@CameraActivity).apply {
                 text = "CamaPro Scope"
-                textSize = 22f
+                textSize = 24f
                 setTextColor(Color.parseColor("#F8FAFC"))
                 gravity = Gravity.CENTER
                 setTypeface(typeface, Typeface.BOLD)
@@ -90,15 +135,31 @@ class CameraActivity : Activity() {
 
         startButton = button("Start", "#3B82F6").apply { setOnClickListener { startStreaming() } }
         stopButton = button("Stop", "#1F2937").apply { setOnClickListener { stopStreaming() } }
+
         tokenRow = TextView(this).apply {
             textSize = 13f
             setTextColor(Color.parseColor("#94A3B8"))
             typeface = Typeface.MONOSPACE
-            setPadding(0, dp(10), 0, dp(10))
+            setPadding(0, dp(8), 0, dp(8))
+            isClickable = true
+            setOnClickListener {
+                copyToClipboard("Token", token)
+            }
         }
-        sheetStatus = TextView(this).apply { textSize = 14f; setTextColor(Color.WHITE); setPadding(0, dp(6), 0, dp(12)) }
+
+        sheetStatus = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(0, dp(6), 0, dp(10))
+        }
+
+        endpointsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4), 0, dp(8))
+        }
+
         previewCaption = TextView(this).apply {
-            text = "Camera preview arrives in the next update"
+            text = "Camera preview active on desktop stream"
             textSize = 12f
             setTextColor(Color.parseColor("#94A3B8"))
             visibility = View.GONE
@@ -108,50 +169,75 @@ class CameraActivity : Activity() {
         val radios = RadioGroup(this).apply {
             id = View.generateViewId()
             addView(RadioButton(this@CameraActivity).apply {
-                text = "Show Camera"; setTextColor(Color.parseColor("#F8FAFC")); id = View.generateViewId()
+                text = "Show Status"; setTextColor(Color.parseColor("#F8FAFC")); id = View.generateViewId()
             })
             addView(RadioButton(this@CameraActivity).apply {
-                text = "Black Screen"; setTextColor(Color.parseColor("#F8FAFC")); id = View.generateViewId(); isChecked = true
+                text = "Black Screen (AMOLED Save)"; setTextColor(Color.parseColor("#F8FAFC")); id = View.generateViewId(); isChecked = true
             })
             setOnCheckedChangeListener { _, checkedId ->
                 displayMode = if (checkedId == getChildAt(0).id)
                     ScopeUi.DisplayMode.SHOW_CAMERA else ScopeUi.DisplayMode.BLACK_SCREEN
-                // No local preview yet: same black, honest caption only.
                 previewCaption.visibility = if (displayMode == ScopeUi.DisplayMode.SHOW_CAMERA) View.VISIBLE else View.GONE
             }
         }
 
-        sheet = LinearLayout(this).apply {
+        val sheetContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(16), dp(20), dp(20))
+            setPadding(dp(20), dp(16), dp(20), dp(24))
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#0F141E"))
                 setStroke(dp(1), Color.parseColor("#14FFFFFF"))
-                cornerRadii = floatArrayOf(dp(12).toFloat(), dp(12).toFloat(), dp(12).toFloat(), dp(12).toFloat(), 0f, 0f, 0f, 0f)
+                cornerRadii = floatArrayOf(dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat(), dp(16).toFloat(), 0f, 0f, 0f, 0f)
             }
-            visibility = View.GONE
+
             addView(sectionLabel("CONNECTION"))
             addView(sheetStatus)
+
+            // Start / Stop controls
             addView(LinearLayout(this@CameraActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 addView(startButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
                 addView(stopButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(8) })
             })
-            addView(button("Scan Desktop QR", "#2563EB").apply {
-                setOnClickListener {
-                    startActivity(Intent(this@CameraActivity, QrScanActivity::class.java))
-                }
+
+            // QR Pairing Action Buttons
+            addView(LinearLayout(this@CameraActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(8), 0, 0)
+                addView(button("Scan Desktop QR", "#2563EB").apply {
+                    setOnClickListener {
+                        qrScanLauncher.launch(Intent(this@CameraActivity, QrScanActivity::class.java))
+                    }
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+
+                addView(button("Show Stream QR", "#059669").apply {
+                    setOnClickListener {
+                        showStreamQrDialog()
+                    }
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) })
             })
+
             addView(tokenRow)
+
+            // Dynamic Endpoints list (Wi-Fi, Tailscale, ADB)
+            addView(sectionLabel("AVAILABLE NETWORK ENDPOINTS"))
+            addView(endpointsContainer)
+
             addView(sectionLabel("DISPLAY WHILE CONNECTED"))
             addView(radios)
             addView(previewCaption)
         }
+
+        sheet = ScrollView(this).apply {
+            addView(sheetContent)
+            visibility = View.GONE
+        }
+
         root.addView(sheet, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM
         ))
 
-        // Floating round button, bottom-right, subtle white/10 stroke.
+        // Floating round button, bottom-right
         val fab = TextView(this).apply {
             text = "•••"
             textSize = 18f
@@ -173,6 +259,7 @@ class CameraActivity : Activity() {
         })
 
         setContentView(root)
+        refreshEndpoints()
         bind(null)
     }
 
@@ -187,7 +274,120 @@ class CameraActivity : Activity() {
     private fun button(text: String, bg: String) = Button(this).apply {
         this.text = text
         setTextColor(Color.WHITE)
+        textSize = 13f
         backgroundTintList = ColorStateList.valueOf(Color.parseColor(bg))
+    }
+
+    private fun refreshEndpoints() {
+        endpointsContainer.removeAllViews()
+        val port = server?.port ?: MjpegHttpServer.DEFAULT_PORT
+        val endpoints = NetworkHelper.getAvailableEndpoints(port, token)
+
+        for (ep in endpoints) {
+            val epView = TextView(this).apply {
+                textSize = 12f
+                typeface = Typeface.MONOSPACE
+                setPadding(dp(8), dp(6), dp(8), dp(6))
+
+                val badge = when (ep.type) {
+                    NetworkHelper.EndpointType.TAILSCALE -> "[Tailscale VPN] "
+                    NetworkHelper.EndpointType.WIFI_LAN -> "[Wi-Fi LAN] "
+                    NetworkHelper.EndpointType.LOOPBACK -> "[ADB Loopback] "
+                    NetworkHelper.EndpointType.OTHER -> "[Network] "
+                }
+
+                val sb = SpannableStringBuilder()
+                sb.append(badge)
+                val badgeColor = when (ep.type) {
+                    NetworkHelper.EndpointType.TAILSCALE -> Color.parseColor("#38BDF8") // Cyan/Tailscale
+                    NetworkHelper.EndpointType.WIFI_LAN -> Color.parseColor("#4ADE80") // Green
+                    NetworkHelper.EndpointType.LOOPBACK -> Color.parseColor("#A78BFA") // Purple
+                    NetworkHelper.EndpointType.OTHER -> Color.parseColor("#94A3B8")
+                }
+                sb.setSpan(ForegroundColorSpan(badgeColor), 0, badge.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                sb.append("${ep.ip}:$port")
+
+                text = sb
+                setTextColor(Color.parseColor("#E2E8F0"))
+
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#141E2E"))
+                    cornerRadius = dp(6).toFloat()
+                }
+
+                setOnClickListener {
+                    copyToClipboard("Stream URL", ep.streamUrl)
+                }
+            }
+
+            endpointsContainer.addView(epView, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, dp(3), 0, dp(3))
+            })
+        }
+    }
+
+    private fun copyToClipboard(label: String, text: String) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+        Toast.makeText(this, "Copied $label to clipboard", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showStreamQrDialog() {
+        val port = server?.port ?: MjpegHttpServer.DEFAULT_PORT
+        val endpoints = NetworkHelper.getAvailableEndpoints(port, token)
+        val primaryEndpoint = endpoints.firstOrNull { it.type != NetworkHelper.EndpointType.LOOPBACK } ?: endpoints.first()
+
+        try {
+            val qrBitmap = NetworkHelper.generateQrBitmap(primaryEndpoint.streamUrl, dp(260))
+            val imageView = ImageView(this).apply {
+                setImageBitmap(qrBitmap)
+                setPadding(dp(16), dp(16), dp(16), dp(8))
+            }
+
+            val container = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setBackgroundColor(Color.parseColor("#0F141E"))
+                addView(imageView)
+                addView(TextView(this@CameraActivity).apply {
+                    text = primaryEndpoint.streamUrl
+                    textSize = 11f
+                    setTextColor(Color.parseColor("#94A3B8"))
+                    gravity = Gravity.CENTER
+                    setPadding(dp(16), 0, dp(16), dp(16))
+                })
+            }
+
+            AlertDialog.Builder(this)
+                .setTitle("Scan Stream QR")
+                .setView(container)
+                .setPositiveButton("Done", null)
+                .setNeutralButton("Copy URL") { _, _ ->
+                    copyToClipboard("Stream URL", primaryEndpoint.streamUrl)
+                }
+                .show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Failed to generate QR: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun handleScannedDesktopPayload(raw: String) {
+        try {
+            val json = JSONObject(raw)
+            val desktopEndpoint = json.optString("endpoint_hint", "Desktop")
+            val secret = json.optString("secret", "")
+            if (secret.isNotBlank()) {
+                token = secret
+            }
+            centerHint.text = "✓ Paired with Desktop ($desktopEndpoint)"
+            Toast.makeText(this, "Paired with $desktopEndpoint", Toast.LENGTH_SHORT).show()
+            refreshEndpoints()
+            bind(null)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Invalid pairing payload: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun bind(startFailedMessage: String?) {
@@ -195,9 +395,18 @@ class CameraActivity : Activity() {
             val ui = ScopeUi.map(server != null, startFailedMessage)
             centerStatus.text = statusSpannable(ui)
             sheetStatus.text = statusSpannable(ui)
-            centerHint.text = ui.hint
+
+            if (server != null) {
+                val feedType = if (isUsingRealCamera) "Real Camera2 (1080p)" else "Synthetic Emulator Feed"
+                centerHint.text = "$feedType • Port ${server?.port}"
+            } else if (startFailedMessage != null) {
+                centerHint.text = startFailedMessage
+            } else {
+                centerHint.text = "Ready to stream on LAN / Tailscale / ADB"
+            }
+
             tokenRow.visibility = if (ui.tokenLine == null) View.GONE else View.VISIBLE
-            tokenRow.text = "${ui.tokenLine} $token"
+            tokenRow.text = "${ui.tokenLine} $token (Tap to copy)"
             startButton.isEnabled = server == null
             stopButton.isEnabled = server != null
         }
@@ -211,11 +420,22 @@ class CameraActivity : Activity() {
         return sb
     }
 
-    // --- server wiring: byte-identical to the pre-restyle activity ---
-
     private fun startStreaming() {
         if (server != null) return
-        val s = MjpegHttpServer(frameSupplier = { queue.dequeue() }, token = token)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            startStreamingInternal(preferRealCamera = true)
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun startStreamingInternal(preferRealCamera: Boolean) {
+        val s = MjpegHttpServer(
+            frameSupplier = { queue.dequeue() },
+            token = token,
+            bindAddress = "0.0.0.0"
+        )
         try {
             s.start()
         } catch (e: Exception) {
@@ -223,6 +443,44 @@ class CameraActivity : Activity() {
             return
         }
         server = s
+
+        var cameraStarted = false
+        if (preferRealCamera) {
+            val src = Camera2Source(this)
+            cameraSource = src
+            src.openCamera(
+                cameraId = "0",
+                onOpened = {
+                    val captured = src.startCapture(1920, 1080, 30) { frameBytes ->
+                        queue.enqueue(frameBytes)
+                    }
+                    if (captured) {
+                        isUsingRealCamera = true
+                        cameraStarted = true
+                        mainHandler.post { bind(null) }
+                    } else {
+                        startSyntheticFallback("Failed to configure 1080p Camera2 stream")
+                    }
+                },
+                onError = { _, msg ->
+                    startSyntheticFallback("Camera2 open: $msg")
+                }
+            )
+        } else {
+            startSyntheticFallback(null)
+        }
+
+        // Keep streaming alive when screen is locked via Foreground Service
+        val port = s.port
+        val primaryEndpoint = NetworkHelper.getAvailableEndpoints(port, token).firstOrNull()
+        CameraStreamService.start(this, primaryEndpoint?.displayLabel ?: "Port $port")
+
+        refreshEndpoints()
+        bind(null)
+    }
+
+    private fun startSyntheticFallback(reason: String?) {
+        isUsingRealCamera = false
         val sched = Executors.newSingleThreadScheduledExecutor { r ->
             Thread(r, "mjpeg-synthetic").apply { isDaemon = true }
         }
@@ -230,7 +488,7 @@ class CameraActivity : Activity() {
         frameTask = sched.scheduleAtFixedRate({
             queue.enqueue(syntheticJpeg())
         }, 0, 500, TimeUnit.MILLISECONDS)
-        bind(null)
+        mainHandler.post { bind(reason) }
     }
 
     private fun stopStreaming() {
@@ -238,9 +496,17 @@ class CameraActivity : Activity() {
         frameTask = null
         scheduler?.shutdownNow()
         scheduler = null
+
+        cameraSource?.stopCapture()
+        cameraSource?.close()
+        cameraSource = null
+        isUsingRealCamera = false
+
         server?.stop()
         server = null
         queue.clear()
+
+        CameraStreamService.stop(this)
         bind(null)
     }
 
@@ -248,9 +514,10 @@ class CameraActivity : Activity() {
         val bmp = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         canvas.drawColor(Color.DKGRAY)
-        val paint = Paint().apply { color = Color.GREEN; textSize = 28f }
-        canvas.drawText("frame ${System.currentTimeMillis()}", 10f, 120f, paint)
-        canvas.drawText("dropped=${queue.droppedFramesCount}", 10f, 160f, paint)
+        val paint = Paint().apply { color = Color.GREEN; textSize = 24f }
+        canvas.drawText("frame ${System.currentTimeMillis()}", 10f, 100f, paint)
+        canvas.drawText("dropped=${queue.droppedFramesCount}", 10f, 140f, paint)
+        canvas.drawText("feed: synthetic", 10f, 180f, paint)
         val out = ByteArrayOutputStream()
         bmp.compress(Bitmap.CompressFormat.JPEG, 60, out)
         bmp.recycle()

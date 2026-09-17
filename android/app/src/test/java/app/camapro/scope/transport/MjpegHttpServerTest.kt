@@ -215,4 +215,41 @@ class MjpegHttpServerTest {
             server.stop()
         }
     }
+
+    @Test
+    fun queryParameterTokenAuthenticatesStream() {
+        val queue = BoundedFrameQueue()
+        val server = startServer(token = "querysecret") { queue.dequeue() }
+        try {
+            // Connect with ?token=querysecret in the URL, without X-Camapro-Token header
+            val sock = connect(server.port, "/stream?token=querysecret", tokenHeader = null)
+            val header = readHttpHeaders(sock.getInputStream())
+            assertTrue(header, header.startsWith("HTTP/1.1 200"))
+            assertTrue(header, header.contains("multipart/x-mixed-replace"))
+
+            queue.enqueue("query-frame".toByteArray(US_ASCII))
+            val parts = parseParts(sock.getInputStream(), 1)
+            assertEquals(1, parts.size)
+            assertArrayEquals("query-frame".toByteArray(US_ASCII), parts[0])
+            sock.close()
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun statusEndpointReturns200OkWithJson() {
+        val server = startServer(token = "statussecret") { null }
+        try {
+            val sock = connect(server.port, "/status", tokenHeader = null)
+            val header = readHttpHeaders(sock.getInputStream())
+            assertTrue(header, header.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(header, header.contains("application/json"))
+            assertTrue(header, header.contains("Access-Control-Allow-Origin: *"))
+            sock.close()
+        } finally {
+            server.stop()
+        }
+    }
 }
+
