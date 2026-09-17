@@ -392,15 +392,96 @@ class CameraActivity : ComponentActivity() {
     private fun handleScannedDesktopPayload(raw: String) {
         try {
             val json = JSONObject(raw)
-            val desktopEndpoint = json.optString("endpoint_hint", "Desktop")
             val secret = json.optString("secret", "")
-            if (secret.isNotBlank()) {
-                token = secret
+            val port = json.optInt("port", 8101)
+            val ips = ArrayList<String>()
+
+            val ipsArray = json.optJSONArray("desktop_ips")
+            if (ipsArray != null) {
+                for (i in 0 until ipsArray.length()) {
+                    val ip = ipsArray.getString(i)
+                    if (ip.isNotBlank() && !ips.contains(ip)) {
+                        ips.add(ip)
+                    }
+                }
             }
-            centerHint.text = "✓ Paired with Desktop ($desktopEndpoint)"
-            Toast.makeText(this, "Paired with $desktopEndpoint", Toast.LENGTH_SHORT).show()
-            refreshEndpoints()
-            bind(null)
+            if (ips.isEmpty()) {
+                val hint = json.optString("endpoint_hint", "")
+                val extracted = hint.replace("http://", "").replace("ws://", "").split("/").firstOrNull()?.split(":")?.firstOrNull()
+                if (!extracted.isNullOrBlank()) ips.add(extracted)
+            }
+
+            if (ips.isEmpty() || secret.isBlank()) {
+                Toast.makeText(this, "Invalid QR code: missing desktop IP or secret", Toast.LENGTH_LONG).show()
+                return
+            }
+
+            centerHint.text = "Connecting to Desktop at ${ips.first()}:$port..."
+            Toast.makeText(this, "Connecting to Desktop...", Toast.LENGTH_SHORT).show()
+
+            // Run network pairing on background thread
+            Executors.newSingleThreadExecutor().execute {
+                var pairedSuccess = false
+                var connectedIp = ""
+                var lastError = "No response from desktop"
+
+                val myPort = server?.port ?: MjpegHttpServer.DEFAULT_PORT
+                val myEndpoints = NetworkHelper.getAvailableEndpoints(myPort, token)
+                val myIp = myEndpoints.firstOrNull { it.type != NetworkHelper.EndpointType.LOOPBACK }?.ip ?: "127.0.0.1"
+                val myDeviceName = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+
+                for (desktopIp in ips) {
+                    try {
+                        val url = java.net.URL("http://$desktopIp:$port/pair")
+                        val conn = url.openConnection() as java.net.HttpURLConnection
+                        conn.requestMethod = "POST"
+                        conn.connectTimeout = 3000
+                        conn.readTimeout = 3000
+                        conn.doOutput = true
+                        conn.setRequestProperty("Content-Type", "application/json")
+
+                        val body = JSONObject().apply {
+                            put("secret", secret)
+                            put("phone_ip", myIp)
+                            put("phone_port", myPort)
+                            put("phone_token", token)
+                            put("phone_name", myDeviceName)
+                        }.toString()
+
+                        conn.outputStream.use { os ->
+                            os.write(body.toByteArray(Charsets.UTF_8))
+                        }
+
+                        val code = conn.responseCode
+                        if (code == 200) {
+                            pairedSuccess = true
+                            connectedIp = desktopIp
+                            break
+                        } else {
+                            lastError = "HTTP $code from Desktop"
+                        }
+                    } catch (e: Exception) {
+                        lastError = e.message ?: "Connection timed out"
+                    }
+                }
+
+                mainHandler.post {
+                    if (pairedSuccess) {
+                        centerHint.text = "✓ Paired with Desktop ($connectedIp)"
+                        Toast.makeText(this@CameraActivity, "✓ Paired with Desktop ($connectedIp)! Video active.", Toast.LENGTH_LONG).show()
+                        if (server == null) {
+                            startStreaming()
+                        }
+                    } else {
+                        centerHint.text = "❌ Cannot reach Desktop ($lastError)"
+                        AlertDialog.Builder(this@CameraActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                            .setTitle("Pairing Failed")
+                            .setMessage("Could not connect to Desktop at ${ips.joinToString(", ")}:$port.\n\nError: $lastError\n\nPlease verify:\n1. Phone and PC are connected to the same Wi-Fi network (or Tailscale VPN).\n2. PC firewall allows incoming connection on port $port.")
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
+                }
+            }
         } catch (e: Exception) {
             Toast.makeText(this, "Invalid pairing payload: ${e.message}", Toast.LENGTH_LONG).show()
         }

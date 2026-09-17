@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Panel } from "@/components/Panel";
 import { StageFrame } from "@/components/StageFrame";
 import { Button } from "@/components/ui/button";
@@ -64,6 +65,11 @@ export function App() {
   const [token, setToken] = useState("");
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrModalOpen, setQrModalOpen] = useState(false);
+  const [endpointHint, setEndpointHint] = useState<string | null>(null);
+  const [pairingSuccess, setPairingSuccess] = useState<string | null>(null);
+  const [checkingPhone, setCheckingPhone] = useState(false);
+  const [phoneOnlineStatus, setPhoneOnlineStatus] = useState<string | null>(null);
+
   const [camera, setCamera] = useState("back");
   const [orientation, setOrientation] = useState("landscape");
   const [resolution, setResolution] = useState("1920x1080");
@@ -84,6 +90,35 @@ export function App() {
     stop: stopPreview,
   } = usePreview();
 
+  // Listen for real 2-way pairing events from desktop's pairing listener
+  useEffect(() => {
+    let unlistenFn: (() => void) | null = null;
+    listen<{ host: string; port: number; token: string; name: string }>(
+      "phone-paired",
+      (event) => {
+        const { host: phoneHost, port: phonePort, token: phoneToken, name: phoneName } = event.payload;
+        setHost(phoneHost);
+        setPort(phonePort);
+        setToken(phoneToken);
+        setPairingSuccess(`✓ Connected to ${phoneName || "Phone"} (${phoneHost})`);
+        // Start streaming immediately on desktop
+        void startPreview(phoneHost, phonePort, phoneToken);
+        setTimeout(() => {
+          setQrModalOpen(false);
+          setPairingSuccess(null);
+        }, 1800);
+      },
+    )
+      .then((unlisten) => {
+        unlistenFn = unlisten;
+      })
+      .catch((err) => console.error("Failed to listen for phone-paired:", err));
+
+    return () => {
+      if (unlistenFn) unlistenFn();
+    };
+  }, []);
+
   const status = previewActive
     ? { dot: "bg-[#4ade80]", text: "text-[#4ade80]", label: "Connected" }
     : sessionState === "Disconnected"
@@ -93,15 +128,20 @@ export function App() {
   const handleParseEndpoint = (input: string) => {
     const trimmed = input.trim();
     if (!trimmed) return;
+    setPhoneOnlineStatus(null);
     try {
       if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
         const parsed = JSON.parse(trimmed);
         if (parsed.secret) setToken(parsed.secret);
+        if (parsed.token) setToken(parsed.token);
         if (parsed.endpoint_hint) {
           const hint = parsed.endpoint_hint.replace(/^https?:\/\//, "").replace(/^ws:\/\//, "");
           const [h, p] = hint.split(":");
           if (h) setHost(h);
           if (p) setPort(Number(p) || 8100);
+        } else if (parsed.ip) {
+          setHost(parsed.ip);
+          if (parsed.port) setPort(Number(parsed.port) || 8100);
         }
         return;
       }
@@ -121,13 +161,30 @@ export function App() {
 
   const openQrPairing = async () => {
     try {
-      const p = await invoke("generate_pairing_qr");
+      setPairingSuccess(null);
+      const p = (await invoke("generate_pairing_qr")) as Record<string, any>;
       const payloadStr = typeof p === "string" ? p : JSON.stringify(p);
+      setEndpointHint(p.endpoint_hint || null);
       const dataUrl = await generateQrDataUrl(payloadStr, 220);
       setQrDataUrl(dataUrl);
       setQrModalOpen(true);
     } catch (e) {
       console.error("Failed to generate pairing QR:", e);
+    }
+  };
+
+  const testPhoneReachability = async () => {
+    setCheckingPhone(true);
+    setPhoneOnlineStatus(null);
+    try {
+      const res = await invoke<{ online: boolean }>("check_phone_status", { host, port });
+      if (res.online) {
+        setPhoneOnlineStatus("✓ Phone is online");
+      }
+    } catch (e) {
+      setPhoneOnlineStatus(`❌ ${String(e)}`);
+    } finally {
+      setCheckingPhone(false);
     }
   };
 
@@ -251,26 +308,39 @@ export function App() {
         <Panel className="mt-auto flex flex-col gap-2 p-2.5">
           <div className="flex items-center justify-between">
             <Label>Connection</Label>
-            <button
-              onClick={async () => {
-                try {
-                  const text = await navigator.clipboard.readText();
-                  if (text) handleParseEndpoint(text);
-                } catch {
-                  /* clipboard permission */
-                }
-              }}
-              className="text-[10px] text-[#60a5fa] hover:underline"
-              title="Paste stream URL or IP:port from phone"
-            >
-              Paste URL
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={testPhoneReachability}
+                disabled={checkingPhone}
+                className="text-[10px] text-[#94a3b8] hover:text-[#f5f7fa] transition-colors"
+                title="Ping phone to check reachability"
+              >
+                {checkingPhone ? "Testing..." : "Test"}
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    const text = await navigator.clipboard.readText();
+                    if (text) handleParseEndpoint(text);
+                  } catch {
+                    /* clipboard permission */
+                  }
+                }}
+                className="text-[10px] text-[#60a5fa] hover:underline"
+                title="Paste stream URL or IP:port from phone"
+              >
+                Paste URL
+              </button>
+            </div>
           </div>
           <div className="flex flex-col gap-1.5">
             <div className="flex gap-1.5">
               <input
                 value={host}
-                onChange={(e) => setHost(e.target.value)}
+                onChange={(e) => {
+                  setHost(e.target.value);
+                  setPhoneOnlineStatus(null);
+                }}
                 placeholder="127.0.0.1 or LAN IP"
                 aria-label="Stream host"
                 className="min-w-0 flex-1 rounded-lg border border-white/10 bg-[#0d131d] px-2 py-1 text-xs text-[#f5f7fa] outline-none focus-visible:ring-2 focus-visible:ring-[#60a5fa]/50"
@@ -280,7 +350,10 @@ export function App() {
                 min={1}
                 max={65535}
                 value={port}
-                onChange={(e) => setPort(Number(e.target.value) || 8100)}
+                onChange={(e) => {
+                  setPort(Number(e.target.value) || 8100);
+                  setPhoneOnlineStatus(null);
+                }}
                 aria-label="Stream port"
                 className="w-16 rounded-lg border border-white/10 bg-[#0d131d] px-2 py-1 text-xs text-[#f5f7fa] outline-none focus-visible:ring-2 focus-visible:ring-[#60a5fa]/50"
               />
@@ -293,6 +366,11 @@ export function App() {
               className="w-full rounded-lg border border-white/10 bg-[#0d131d] px-2 py-1 font-mono text-xs text-[#f5f7fa] outline-none focus-visible:ring-2 focus-visible:ring-[#60a5fa]/50"
             />
           </div>
+          {phoneOnlineStatus ? (
+            <p className={cn("text-[11px]", phoneOnlineStatus.startsWith("✓") ? "text-[#4ade80]" : "text-[#f87171]")}>
+              {phoneOnlineStatus}
+            </p>
+          ) : null}
           {previewActive ? (
             <Button onClick={stopPreview} disabled={previewBusy} size="sm" variant="secondary" className="w-full gap-1.5 text-xs">
               <VideoIcon className="size-3.5" /> Disconnect
@@ -392,7 +470,7 @@ export function App() {
         </aside>
       )}
 
-      {/* QR Pairing Modal */}
+      {/* QR Pairing Modal with Real-time 2-Way Confirmation */}
       {qrModalOpen && qrDataUrl ? (
         <div
           role="dialog"
@@ -406,7 +484,10 @@ export function App() {
                 <h3 className="text-sm font-semibold text-white">Desktop Pairing QR</h3>
               </div>
               <button
-                onClick={() => setQrModalOpen(false)}
+                onClick={() => {
+                  setQrModalOpen(false);
+                  setPairingSuccess(null);
+                }}
                 aria-label="Close dialog"
                 className="rounded-md p-1 text-[#94a3b8] hover:bg-white/10 hover:text-white"
               >
@@ -414,22 +495,48 @@ export function App() {
               </button>
             </div>
 
-            <div className="rounded-xl bg-white p-3 shadow-inner">
-              <img src={qrDataUrl} alt="Pairing QR Code" className="size-48 object-contain" />
-            </div>
+            {pairingSuccess ? (
+              <div className="flex w-full flex-col items-center gap-2 rounded-xl bg-[#4ade80]/15 border border-[#4ade80]/30 p-6 text-center animate-in zoom-in-95">
+                <span className="flex size-12 items-center justify-center rounded-full bg-[#4ade80]/20 text-2xl text-[#4ade80]">
+                  ✓
+                </span>
+                <p className="text-sm font-semibold text-[#4ade80]">{pairingSuccess}</p>
+                <p className="text-xs text-[#94a3b8]">Live video stream starting on PC...</p>
+              </div>
+            ) : (
+              <>
+                <div className="rounded-xl bg-white p-3 shadow-inner">
+                  <img src={qrDataUrl} alt="Pairing QR Code" className="size-48 object-contain" />
+                </div>
 
-            <p className="text-center text-xs text-[#94a3b8]">
-              Open <span className="font-semibold text-[#f5f7fa]">Camapro Scope</span> on your phone and tap{" "}
-              <span className="font-semibold text-[#60a5fa]">Scan Desktop QR</span> to pair instantly.
-            </p>
+                <div className="flex flex-col items-center gap-1.5 text-center">
+                  <div className="flex items-center gap-1.5 text-xs text-[#60a5fa]">
+                    <span className="size-2 animate-pulse rounded-full bg-[#60a5fa]" />
+                    <span className="font-medium">Waiting for phone to scan QR...</span>
+                  </div>
+                  {endpointHint ? (
+                    <span className="rounded bg-white/5 px-2 py-0.5 font-mono text-[11px] text-[#94a3b8] select-all">
+                      {endpointHint}
+                    </span>
+                  ) : null}
+                  <p className="text-xs text-[#94a3b8] mt-1">
+                    Open <span className="font-semibold text-[#f5f7fa]">Camapro Scope</span> on your phone and tap{" "}
+                    <span className="font-semibold text-[#60a5fa]">Scan Desktop QR</span>. Both devices will pair automatically.
+                  </p>
+                </div>
+              </>
+            )}
 
             <Button
-              onClick={() => setQrModalOpen(false)}
+              onClick={() => {
+                setQrModalOpen(false);
+                setPairingSuccess(null);
+              }}
               size="sm"
               variant="outline"
               className="w-full border-white/10 text-xs"
             >
-              Done
+              Close
             </Button>
           </div>
         </div>

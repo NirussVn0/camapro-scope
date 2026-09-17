@@ -2,6 +2,7 @@ pub mod core;
 pub mod platform;
 
 use core::commands::{CameraSetPayload, CommandDispatcher};
+use core::control::PairingServer;
 use core::session::SessionController;
 use platform::linux::preview::NativePreviewSink;
 use platform::linux::virtual_output::{OutputState, VirtualOutputError, DEFAULT_DEVICE};
@@ -10,6 +11,8 @@ use tauri::State;
 
 /// Shared dispatcher state behind a mutex, same single-authority pattern as session commands (Invariant D05).
 struct AppState(Mutex<CommandDispatcher>);
+
+struct PairingServerState(PairingServer);
 
 #[tauri::command]
 fn virtual_output_start(
@@ -73,6 +76,36 @@ fn preview_status(state: State<AppState>) -> Result<serde_json::Value, String> {
     }))
 }
 
+#[tauri::command]
+fn check_phone_status(host: String, port: u16) -> Result<serde_json::Value, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let addr = format!("{host}:{port}");
+    let socket_addr = addr
+        .parse()
+        .map_err(|e| format!("Invalid address {addr}: {e}"))?;
+
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(2000))
+        .map_err(|e| format!("Cannot reach phone at {addr}: {e}"))?;
+
+    stream.set_read_timeout(Some(Duration::from_millis(2000))).ok();
+    stream.set_write_timeout(Some(Duration::from_millis(2000))).ok();
+
+    let req = format!("GET /status HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).map_err(|e| e.to_string())?;
+
+    if resp.contains("200 OK") {
+        Ok(serde_json::json!({ "online": true, "host": host, "port": port }))
+    } else {
+        Err(format!("Phone returned unexpected response: {resp}"))
+    }
+}
+
 /// G4 structural prep: accepts typed camera.set payload per protocol schema.
 /// Returns Ok but does nothing until WSS transport + Android handler exist.
 /// ponytail: inert stub; wire when physical phone available.
@@ -86,25 +119,13 @@ fn camera_set(_state: State<AppState>, payload: CameraSetPayload) -> Result<(), 
     Ok(())
 }
 
-/// G4 structural prep: generate a QR pairing payload per D03/PROTOCOL.md.
-/// Returns the JSON-serializable payload; actual QR visual rendering deferred.
-/// ponytail: no secure storage or TLS pinning yet; add when physical phone available.
+/// Generate real 2-way pairing session with local IP discovery and HTTP callback.
 #[tauri::command]
-fn generate_pairing_qr() -> Result<serde_json::Value, String> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_millis() as u64;
-    // Placeholder fingerprint + secret; real impl uses platform KeyStore + rustls.
-    let payload = serde_json::json!({
-        "version": 1,
-        "endpoint_hint": "ws://192.168.1.100:9443",
-        "peer_fingerprint_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        "secret": format!("{:016x}", now_ms),
-        "expires_at_ms": now_ms + 300_000 // 5 min
-    });
-    Ok(payload)
+fn generate_pairing_qr(
+    app: tauri::AppHandle,
+    state: State<PairingServerState>,
+) -> Result<serde_json::Value, String> {
+    state.0.start_pairing_session(app)
 }
 
 /// Headless T2 preview smoke: stream from `host:port` with `token`, pump
@@ -175,8 +196,10 @@ pub fn virtual_output_smoke(secs: u64) -> i32 {
 pub fn run() {
     let dispatcher =
         CommandDispatcher::new(SessionController::new(6_000), NativePreviewSink::new());
+    let pairing_server = PairingServer::new();
     tauri::Builder::default()
         .manage(AppState(Mutex::new(dispatcher)))
+        .manage(PairingServerState(pairing_server))
         .invoke_handler(tauri::generate_handler![
             virtual_output_start,
             virtual_output_stop,
@@ -185,7 +208,8 @@ pub fn run() {
             preview_stop,
             preview_status,
             camera_set,
-            generate_pairing_qr
+            generate_pairing_qr,
+            check_phone_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
