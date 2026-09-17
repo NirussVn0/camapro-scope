@@ -1,6 +1,7 @@
 package app.camapro.scope
 
 import android.app.Activity
+import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -135,6 +136,11 @@ class CameraActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL
                 addView(startButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
                 addView(stopButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(8) })
+            })
+            addView(button("Scan Desktop QR", "#2563EB").apply {
+                setOnClickListener {
+                    startActivity(Intent(this@CameraActivity, QrScanActivity::class.java))
+                }
             })
             addView(tokenRow)
             addView(sectionLabel("DISPLAY WHILE CONNECTED"))

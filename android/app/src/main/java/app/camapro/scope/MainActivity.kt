@@ -1,14 +1,20 @@
 package app.camapro.scope
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
-import android.widget.TextView
 
+/**
+ * Trampoline forwarding legacy G1.3 MainActivity invocations to CameraActivity.
+ * Removed from LAUNCHER in AndroidManifest.xml to eliminate duplicate app icons.
+ */
 class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val text = TextView(this)
-        text.text = "Camapro Scope skeleton (G1.3). No camera functionality is implemented."
-        setContentView(text)
+        val intent = Intent(this, CameraActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_FORWARD_RESULT)
+        }
+        startActivity(intent)
+        finish()
     }
 }
