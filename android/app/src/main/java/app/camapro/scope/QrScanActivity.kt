@@ -1,5 +1,3 @@
-@file:OptIn(ExperimentalGetImage::class)
-
 package app.camapro.scope
 
 import android.Manifest
@@ -9,9 +7,9 @@ import android.util.Size
 import android.view.View
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.ComponentActivity
+import androidx.core.app.ActivityCompat
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -29,7 +27,7 @@ import java.util.concurrent.Executors
  * Scans QR codes containing QrPayload JSON, returns result to caller via setResult().
  * ponytail: minimal implementation; add viewfinder overlay and haptic feedback later.
  */
-class QrScanActivity : AppCompatActivity() {
+class QrScanActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_QR_PAYLOAD = "qr_payload"
@@ -67,15 +65,42 @@ class QrScanActivity : AppCompatActivity() {
         }
         root.addView(previewView)
 
+        // Close button (top-left)
+        val closeBtn = TextView(this).apply {
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.TOP or android.view.Gravity.START
+            ).apply {
+                setMargins(48, 64, 0, 0)
+            }
+            text = "✕ Close"
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 15f
+            setPadding(32, 16, 32, 16)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0x66000000.toInt())
+                cornerRadius = 24f
+            }
+            isClickable = true
+            setOnClickListener { finish() }
+        }
+        root.addView(closeBtn)
+
         statusText = TextView(this).apply {
             layoutParams = android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
                 android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL
-            ).apply { bottomMargin = 64 }
-            text = "Point at QR code"
+            ).apply { bottomMargin = 96 }
+            text = "Point camera at Desktop QR code"
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 16f
+            textSize = 15f
+            setPadding(32, 16, 32, 16)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0x88000000.toInt())
+                cornerRadius = 24f
+            }
         }
         root.addView(statusText)
 
@@ -94,7 +119,6 @@ class QrScanActivity : AppCompatActivity() {
         }
     }
 
-    @OptIn(ExperimentalGetImage::class)
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({

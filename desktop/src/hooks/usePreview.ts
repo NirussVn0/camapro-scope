@@ -29,11 +29,15 @@ export function usePreview() {
     return () => clearInterval(t);
   }, [active]);
 
-  const start = async (port: number, token: string) => {
+  const start = async (host: string, port: number, token: string) => {
     setBusy(true);
     setError(null);
     try {
-      await invoke("preview_start", { host: "127.0.0.1", port, token });
+      await invoke("preview_start", {
+        host: host.trim() || "127.0.0.1",
+        port,
+        token: token.trim(),
+      });
       setActive(true);
     } catch (e) {
       setError(String(e));

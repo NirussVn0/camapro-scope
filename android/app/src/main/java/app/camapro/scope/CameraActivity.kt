@@ -64,6 +64,7 @@ class CameraActivity : ComponentActivity() {
     private var scheduler: ScheduledExecutorService? = null
     private var frameTask: ScheduledFuture<*>? = null
     private var isUsingRealCamera = false
+    private var autoStartOnPermission = false
 
     private var token: String = Random.nextLong(0x10000000, 0xFFFFFFF0).toString(16)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -83,11 +84,21 @@ class CameraActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            startStreamingInternal(preferRealCamera = true)
+            Toast.makeText(this, "Camera permission granted", Toast.LENGTH_SHORT).show()
+            if (autoStartOnPermission) {
+                startStreamingInternal(preferRealCamera = true)
+            } else {
+                bind(null)
+            }
         } else {
-            Toast.makeText(this, "Camera permission denied; using synthetic feed", Toast.LENGTH_LONG).show()
-            startStreamingInternal(preferRealCamera = false)
+            Toast.makeText(this, "Camera permission denied; synthetic feed will be used", Toast.LENGTH_LONG).show()
+            if (autoStartOnPermission) {
+                startStreamingInternal(preferRealCamera = false)
+            } else {
+                bind(null)
+            }
         }
+        autoStartOnPermission = false
     }
 
     private val qrScanLauncher = registerForActivityResult(
@@ -261,6 +272,11 @@ class CameraActivity : ComponentActivity() {
         setContentView(root)
         refreshEndpoints()
         bind(null)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            autoStartOnPermission = false
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
     }
 
     private fun sectionLabel(text: String) = TextView(this).apply {
@@ -360,7 +376,7 @@ class CameraActivity : ComponentActivity() {
                 })
             }
 
-            AlertDialog.Builder(this)
+            AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("Scan Stream QR")
                 .setView(container)
                 .setPositiveButton("Done", null)
@@ -426,6 +442,7 @@ class CameraActivity : ComponentActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startStreamingInternal(preferRealCamera = true)
         } else {
+            autoStartOnPermission = true
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
