@@ -65,6 +65,14 @@ impl ProfileStore {
         Self { dir: dir.into() }
     }
 
+    pub fn default_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("CAMAPRO_PROFILE_DIR") {
+            return PathBuf::from(dir);
+        }
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".config").join("camapro-scope").join("profiles")
+    }
+
     fn profile_path(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{name}.json"))
     }

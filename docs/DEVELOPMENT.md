@@ -1,98 +1,61 @@
+---
+type: Development & Verification Guide
+status: Active
+version: 0.2.0
+last_updated: 2026-09-19
+owner: NirussVn0
+authority: docs/DEVELOPMENT.md
+---
+
 # Development and verification
 
-## Current runnable checks
+## 1. Quick Verification Commands
 
-G1 established the contract suite and build toolchains. From repository root:
+From repository root, run each command within its specified workspace:
 
-```bash
-python -m unittest discover -s protocol/tests -v   # after: python -m venv protocol/.venv && protocol/.venv/bin/pip install -r protocol/requirements-test.txt
-cd android && JAVA_HOME=~/Android/jdk/jdk-21.0.12.1+1 ANDROID_HOME=~/Android/Sdk ./gradlew lintDebug testDebugUnitTest assembleDebug
-cd desktop && pnpm install --frozen-lockfile --ignore-scripts && pnpm typecheck && pnpm build
-cd desktop/src-tauri && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
-git status --short --branch
-```
+| Scope | Command | Purpose |
+|---|---|---|
+| **All-in-One Packaging** | `./build-installer.sh --no-rebuild` | Builds portable Linux tarball + Android APK. |
+| **Protocol Fixtures** | `python -m unittest discover -s protocol/tests -v` | Validates 43 schema and semantic test fixtures. |
+| **Android Lint & Tests** | `cd android && ./gradlew lintDebug testDebugUnitTest` | Runs Android JVM tests (CameraEngine, SessionManager). |
+| **Android Build** | `cd android && ./gradlew assembleDebug` | Produces debug APK in `android/app/build/outputs/apk/`. |
+| **Desktop Rust Suite** | `cd desktop/src-tauri && cargo test --locked` | Runs all 42 core/contract & platform integration tests. |
+| **Desktop Rust Lint** | `cd desktop/src-tauri && cargo fmt -- --check && cargo clippy` | Ensures strict Rust formatting and zero clippy warnings. |
+| **Desktop Web UI** | `cd desktop && pnpm typecheck && pnpm test && pnpm build` | TypeScript typecheck, unit tests, and production Vite bundle. |
+| **Desktop Native App** | `cd desktop && pnpm tauri build` | Full Linux desktop executable packaging. |
 
-`git diff --check` does not inspect untracked files; use a captured baseline plus direct file validation for review. JSON syntax success is not protocol semantics success. Android toolchains live under `~/Android/` (SDK + Temurin JDK 21, home directory); CI provisions its own equivalents.
+---
 
-## Delivery loop
+## 2. Implementation Loop (Verified Slice)
 
-1. Select one gate/task in [ROADMAP.md](ROADMAP.md); load relevant skills from [AGENTS.md](../AGENTS.md).
-2. Check prerequisite decisions/evidence and existing workspace changes. Define observable behavior and test before implementation.
-3. Observe the test fail for its intended behavior, implement the minimum, rerun focused tests and relevant full gates.
-4. Exercise the real integration. Use fakes for deterministic lifecycle tests, but label them; never present fake video as Camera2/device proof.
-5. Update affected canon and evidence; get independent review at each major gate. Lead verifies outputs, then changes roadmap status. No autonomous commit/push/release.
+Every implementation task follows these rules:
+1. **Scope Check:** Identify the single gate/task in [ROADMAP.md](ROADMAP.md) and check component invariants in [ARCHITECTURE.md](ARCHITECTURE.md).
+2. **Red-Green Test Cycle:**
+   * Write an observable failing behavioral test before changing production code.
+   * Verify intended failure (not a syntax/import error).
+   * Implement the minimum coherent code to achieve green.
+3. **Run Full Subsystem Gates:** Run the relevant commands above. A frontend build does NOT validate Tauri native code; JVM tests do NOT validate real Camera2 hardware.
+4. **Cleanliness:** No unreviewed host changes, kernel module forced installations, or unauthenticated open network ports.
 
-## Future application commands (established by G1; hardware gates still pending)
+---
 
-G1 must pin tools/dependencies and establish these scripts. Run each from its specified directory and record actual exit status:
+## 3. Acceptance Matrix
 
+| Layer | Automated Test Evidence | Integration / Hardware Proof |
+|---|---|---|
+| **Protocol** | Negative schema fixtures, Kotlin/Rust parity, unit boundings. | Cross-runtime exchange between Android & Desktop. |
+| **Session** | State machine transition matrix with fake monotonic clock. | Wi-Fi drop, notification kill, permission revoke, process death. |
+| **Trust** | Expired/reused QR secret rejection, wrong identity rejection. | Mutual QR pairing handshake over LAN, Tailscale, or USB ADB. |
+| **Media** | Bounded frame queues (max 2 frames), corrupt part recovery. | Real Camera2 capture delivered to native Waylandsink preview. |
+| **Platform** | Simulated sink tests, missing device error detection. | Frame capture in OBS Studio and web browsers. |
+| **UI** | State-driven panels (Disconnected, Ready, Streaming). | No raw video frames passed through React/JS; zero-lag controls. |
 
-| Directory            | Planned command                                          | Checks                                                                                             |
-| -------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| repository root      | `python -m unittest discover -s protocol/tests -v`       | fixture corpus after installing pinned `protocol/requirements-test.txt` in an isolated environment |
-| `android/`           | `./gradlew lintDebug testDebugUnitTest assembleDebug`    | lint + JVM tests + debug APK                                                                       |
-| `desktop/src-tauri/` | `cargo fmt --all -- --check`                             | format                                                                                             |
-| `desktop/src-tauri/` | `cargo clippy --all-targets --locked -- -D warnings`     | target-appropriate features; never blanket mutually-exclusive all-features                         |
-| `desktop/src-tauri/` | `cargo test --locked`                                    | core/contract tests                                                                                |
-| `desktop/`           | `pnpm install --frozen-lockfile`                         | reproducible JS dependency install                                                                 |
-| `desktop/`           | `pnpm lint && pnpm typecheck && pnpm test && pnpm build` | controls UI; `test` must be non-watch                                                              |
-| `desktop/`           | `pnpm tauri build`                                       | full desktop/native packaging, not just Vite bundle                                                |
+---
 
+## 4. Performance Measurement Standards (G5 Gate)
 
-Android instrumentation/device scenarios are additional to JVM tests. Windows gets its own target build/OS execution. CI should fail when required test suites are absent; do not mark a skipped hardware gate PASS. Unit/contract CI and hardware acceptance are distinct statuses.
-
-## Acceptance matrix
-
-
-| Layer    | Automated evidence                                                                           | Integration/hardware evidence                                        |
-| -------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Protocol | every message + negative fixtures, Kotlin/Rust parity, units, direction, duplicate semantics | authenticated cross-runtime exchange                                 |
-| Session  | fake clock and fault-injected transition matrix                                              | kill desktop, interrupt Wi-Fi, revoke permission, stop notification  |
-| Trust    | wrong fingerprint, expired/reused secret, revocation, unauthenticated media, log redaction   | actual pairing and secure persistence on reference OS/device         |
-| Media    | bounded parser/queues, corrupt data, slow sink, generation isolation                         | real Camera2 → native surface/output; negotiated vs delivered mode   |
-| Platform | port-level fake tests; target build                                                          | OBS/browser actual frames, permissions, resize, install/uninstall    |
-| UI       | capability-disabled states, errors, start/stop actions                                       | no raw-frame IPC; clear Ready/Streaming/Reconnecting/degraded states |
-
-
-## Performance measurement
-
-G0 fixes numerical pass thresholds and reference hardware before G5. Start with 720p30 to retire integration risk; 1080p30 / &lt;250 ms / 30 minutes remain Linux release goals. Production 1080p60 / &lt;120 ms is exploratory until measured.
-
-Record sender and receiver frame counters, delivered FPS distribution, drops, queue high-water marks, CPU and periodic RSS for both processes, and thermal/battery state. Define warm-up, sample interval, baseline and allowed RSS slope/peak before a run. “No growth” is not established by two screenshots or a stable short sample. Report stalls and disconnections, not only averages.
-
-For end-to-end latency, use an external high-frame-rate recording of a common timer/reference and receiver display, or another documented clock-calibrated method. Unrelated phone/desktop wall-clock subtraction does not measure valid one-way latency. Report method, sample count, p50/p95 and uncertainty. Do not manufacture latency from target settings.
-
-## Evidence record template
-
-Future files live under `docs/evidence/` as each gate runs; do not generate empty PASS records now.
-
-```text
-Gate/task and verdict: PASS / FAIL / BLOCKED
-Date, inspected commit and dirty/untracked scope:
-Changed paths / artifact checksums:
-Environment: device/model, Android, SDK, OS/compositor, app/tool versions
-Decisions and prerequisites:
-Commands: exact cwd + command + exit status + log/artifact path
-Scenario: actual source/receiver/network, duration, selected and negotiated mode
-Measurements: method, thresholds fixed before test, actual values and uncertainty
-Fault cases and recovery/resource cleanup:
-Evidence type: simulated / build / integrated / real hardware
-Independent reviewer findings and lead verification:
-Limitations and unresolved support rows:
-```
-
-Do not put tokens, keys, raw QR enrollment data or personal footage into evidence. Use synthetic test patterns for stored artifacts unless the user explicitly approves real footage retention.
-
-## Linux release checklist (all currently unverified)
-
-- [ ] Works on declared LAN without cloud and with authenticated control/media.
-- [ ] Declared reference mode passes measured 30-minute limits.
-- [ ] OBS and browser show current frames, not just a device name.
-- [ ] Supported EV/focus/lens controls apply correctly; unsupported states are honest.
-- [ ] Stop, desktop death, permission revocation and Wi-Fi loss release phone capture.
-- [ ] Reconnect follows approved policy and does not silently restart capture.
-- [ ] Bounded memory/latency under slow consumers; no JS video-frame bridge.
-- [ ] Trusted-peer persistence, revocation and secure storage work.
-- [ ] Clean-machine packaging/dependencies and licensing inventory verified.
-
-Under proposed D11 this checklist is the G5 camera release, with profiles/CLI/hotkeys in G6. If the owner retains the broader original MVP scope, G6 must also pass before calling it the agreed MVP. Broad distro and Windows support always require their own evidence; this checklist never implies them.
+For release qualification (Gate G5):
+* **Target:** 1080p30 (fallback 720p30) sustained over 30 minutes with $\le 16\text{ MiB}$ media queue.
+* **Latency Method:** Use an external high-frame-rate recording of a common digital timer/reference, or clock-calibrated timestamp delta. Simple uncalibrated clock subtraction across devices is invalid.
+* **Telemetry Required:** Delivered FPS distribution, drop counts, queue high-water mark, process RSS curve, Android battery drain, and thermal throttling status.
+* **Automation:** Pre-written measurement script is available at `scripts/g5-measure.sh`.

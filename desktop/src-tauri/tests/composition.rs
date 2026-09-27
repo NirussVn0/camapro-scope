@@ -63,3 +63,54 @@ fn repeated_reopen_does_not_leak_stale_generation() {
     assert_eq!(dispatcher.status(), SessionState::Streaming);
     assert!(dispatcher.preview().is_active());
 }
+
+#[test]
+fn camera_set_dispatches_http_post_and_parses_response() {
+    use camapro_scope_lib::core::commands::CameraSetPayload;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server_thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        let n = stream.read(&mut buf).unwrap();
+        let req = String::from_utf8_lossy(&buf[..n]);
+        assert!(req.starts_with("POST /control HTTP/1.1"));
+        assert!(req.contains("X-Camapro-Token: test-token"));
+        assert!(req.contains("\"type\":\"camera.set\""));
+
+        let res_body = r#"{"v":1,"id":1,"type":"response","ok":true,"result":{"applied":{"exposureCompensationSteps":2}}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            res_body.len(),
+            res_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let session = SessionController::new(6_000);
+    let preview = NativePreviewSink::new();
+    let mut dispatcher = CommandDispatcher::new(session, preview);
+
+    let payload = CameraSetPayload {
+        camera_id: "0".to_string(),
+        capability_revision: 1,
+        changes: serde_json::json!({ "exposureCompensationSteps": 2 }),
+    };
+
+    let res = dispatcher.camera_set("127.0.0.1", port, "test-token", payload);
+    assert!(res.is_ok(), "camera_set failed: {:?}", res.err());
+    let res_json = res.unwrap();
+    assert_eq!(res_json["ok"], true);
+    assert_eq!(res_json["result"]["applied"]["exposureCompensationSteps"], 2);
+
+    server_thread.join().unwrap();
+}
+

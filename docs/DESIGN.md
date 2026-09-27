@@ -1,3 +1,12 @@
+---
+type: UI/UX Design System
+status: Active Canon (Implemented in v0.2.0)
+version: 0.2.0
+last_updated: 2026-09-19
+owner: NirussVn0
+authority: docs/DESIGN.md
+---
+
 # Camapro Scope — UI/UX Design System
 
 This file encodes the owner's two UI/UX briefs (desktop + mobile, supplied

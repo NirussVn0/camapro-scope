@@ -1,63 +1,87 @@
-# Control protocol — v1 design, not frozen
+---
+type: Protocol Specification
+status: Frozen v1 Contract (Active)
+version: 1.0.0
+last_updated: 2026-09-19
+owner: NirussVn0
+authority: docs/PROTOCOL.md
+---
 
-## Status and authority
+# Control protocol — v1 specification
 
-G1 froze this contract: [control-message.schema.json](../protocol/control-message.schema.json) is now a discriminated per-type schema (safe-integer IDs, per-direction ID rules, typed payloads, the 12-code error taxonomy, fail-closed unknown fields/controls) with a shared 43-fixture corpus in `protocol/fixtures/` validated by Python, Rust and Kotlin consumers. The original permissive draft envelope is preserved in git history. Temporal lifecycle regressions (stop-timeout, reconnect generation isolation) and pairing/media trust vectors exist as declared fixtures; executable stop/reconnect timing harnesses land with the G2 session slice (fake monotonic clock per PROTOCOL.md). The schema `$id` is an identifier, not proof of a hosted endpoint.
+## 1. Scope and Security Model
 
-## Transport and trust
+Control and media are separate logical channels bound to the same authenticated peer/session:
+* **Control Channel:** WebSocket (WSS) / HTTP JSON control messages.
+* **Media Channel:** Authenticated MJPEG HTTP stream with bounded frames (future: encrypted H.264).
+* **Pairing Flow (D03):** 
+  1. Phone generates expiring one-time secret and displays QR code binding endpoint IP, port, fingerprint, and secret.
+  2. Desktop scans/receives QR and performs mutual TLS/identity verification.
+  3. Secret is consumed atomically on successful enrollment; credentials persist in platform secure storage (`TrustStore` / `keyring-rs`).
+  4. Header-bound session authorization is required for every control and media request (no bearer tokens in URLs, mDNS, or logs).
 
-Control and media are separate logical channels bound to the same authenticated peer/session. Proposed D03: WSS control and HTTPS MJPEG with pinned identity bootstrapped by QR. The exact certificate/key provisioning and platform TLS library compatibility must be settled in G0; do not accept arbitrary/self-signed certificates merely because the network is local. Later RTP requires its own approved encryption/authentication profile.
+---
 
-Pairing flow to freeze in G1:
+## 2. Message Envelopes and Types
 
-1. User opens pairing on the phone; generate an expiring one-time nonce/secret and expose only non-secret discovery metadata.
-2. QR binds protocol version, endpoint hint, peer identity fingerprint, secret and expiry. Endpoint is not identity. User explicitly approves the peer.
-3. Verify pinned TLS identity before sending secret; consume the secret atomically on successful enrollment. Reject expired/reused secrets and bound/rate-limit attempts.
-4. Store long-lived credentials using platform secure storage; stop with actionable error if unavailable (no plaintext fallback). Define revocation and device-reset behavior.
-5. Authenticate each control connection and media request. Use header-bound short-lived session authorization, not bearer tokens in URLs, mDNS or logs. Media authorization ends on stop/revocation/lease expiry.
+All wire messages follow `v: 1` discriminated schema in `protocol/control-message.schema.json`. Request IDs are JSON-safe integers (0 to $2^{53}-1$) scoped to the connection generation.
 
-An explicitly opted-in developer experiment may use a synthetic source on loopback or a controlled isolated test network; it does not satisfy pairing/security acceptance and must not become an ordinary real-camera LAN default.
-
-## Planned message semantics
-
-Base fields: `v: 1`, `type`, optional `id` depending on message kind. G1 fixes request IDs to JSON-safe integers (0 through 9007199254740991) scoped to a connection generation; callers must not reuse them within that connection. Version mismatch is rejected before command execution. Extensions live in a bounded namespaced extension object; unknown commands and unknown camera-control keys fail closed rather than silently succeeding.
-
-| Type | Direction | ID / result | Payload to specify in G1 |
+| Type | Direction | Request ID | Payload Summary |
 |---|---|---|---|
-| hello | desktop → phone | request ID; response | supported major version, identity reference, client info; auth already established |
-| capabilities | phone → desktop | event, no request ID | camera IDs, modes, ranges/steps/units, resolution/FPS combinations, revision |
-| camera.state | phone → desktop | event, no request ID | applied values, camera ID, revision, stream state |
-| camera.set | desktop → phone | request ID; response or error | camera ID, expected capability revision, typed non-empty changes |
-| session.start | desktop → phone | request ID; response or error | selected mode/transport; return authenticated media descriptor/session generation |
-| session.stop | desktop → phone | request ID; response or error | session generation; idempotent already-stopped result |
-| ping | desktop → phone | request ID; pong | current lease/session generation |
-| pong | phone → desktop | same ping ID | bounded liveness response; not permission to start capture |
-| response | phone → desktop | correlated ID, ok=true | typed result for original operation |
-| error | phone → desktop | correlated ID if request-related | typed code, safe message, retryability; no secrets |
+| `hello` | Desktop $\rightarrow$ Phone | Required | Supported major version, peer identity reference, client info. |
+| `capabilities` | Phone $\rightarrow$ Desktop | Event (none) | Available camera IDs, supported modes, resolution/FPS combinations, capability revision. |
+| `camera.state` | Phone $\rightarrow$ Desktop | Event (none) | Confirmed applied values, active camera ID, capability revision, stream state. |
+| `camera.set` | Desktop $\rightarrow$ Phone | Required | Target camera ID, expected capability revision, typed non-empty control changes. |
+| `session.start` | Desktop $\rightarrow$ Phone | Required | Selected mode and transport descriptor; returns session generation and media endpoint. |
+| `session.stop` | Desktop $\rightarrow$ Phone | Required | Active session generation; idempotent release confirmation. |
+| `ping` | Desktop $\rightarrow$ Phone | Required | Current lease/session generation. |
+| `pong` | Phone $\rightarrow$ Desktop | Matching ping ID | Bounded liveness confirmation (does not authorize stream start). |
+| `response` | Phone $\rightarrow$ Desktop | Correlated ID | `ok: true`, plus typed result for the completed operation. |
+| `error` | Phone $\rightarrow$ Desktop | Correlated ID / optional | Typed error code, safe human-readable message, retryable flag. |
 
-A response acknowledges completed application of the command, not merely queue admission. `session.start` response means sender/endpoint ready; desktop enters Streaming only after its first valid decoded frame. `session.stop` acknowledges released capture/encoder resources. Events project confirmed state, never optimistic UI state.
+### Camera Control Units
+* **EV Compensation:** Integer steps with device-reported rational step size (`exposureCompensationSteps`).
+* **Manual Exposure:** Atomic transaction setting AE off + ISO (integer sensitivity) + shutter speed (integer nanoseconds).
+* **Focus:** Diopters (float).
+* **Fail-closed:** Unknown controls, out-of-range parameters, or unsupported hardware features fail closed without partial application.
 
-Example **design only** (must become a valid fixture against the replacement schema in G1):
+---
 
-```json
-{"v":1,"id":42,"type":"camera.set","payload":{"cameraId":"0","capabilityRevision":3,"changes":{"exposureCompensationSteps":2}}}
-```
+## 3. Error Taxonomy
 
-EV is integer compensation steps with device-reported rational EV-per-step, not a hardcoded float. ISO is integer sensitivity, shutter is integer nanoseconds, focus distance is diopters; validate representability across Kotlin/Rust/JS. Manual exposure is an atomic AE-off + ISO + shutter change, validated against selected FPS. Capability limits are device state, not static schema constants. Rejected control leaves effective state unchanged.
+All error responses strictly use one of these 12 frozen codes:
 
-## Ordering, failure and recovery
+| Error Code | Meaning | Retryable |
+|---|---|---|
+| `unsupported_version` | Major protocol version mismatch. | No |
+| `unauthenticated` | Missing or invalid session token/identity. | No (re-auth required) |
+| `forbidden` | Action not permitted for peer or current state. | No |
+| `busy` | Subsystem currently executing a conflicting operation. | Yes (backoff) |
+| `invalid_payload` | Schema validation or JSON syntax failure. | No |
+| `unsupported_control` | Control property not supported by selected camera. | No |
+| `stale_capabilities` | Expected capability revision does not match current camera state. | Yes (after refresh) |
+| `invalid_state` | Command invalid in current lifecycle state (e.g. stop when idle). | No |
+| `timeout` | Operation timed out before completion. | Yes |
+| `permission_denied` | OS denied camera or hardware permission. | No |
+| `media_failure` | Camera2 capture pipeline or encoder failure. | Yes |
+| `internal` | Unexpected server/client internal runtime error. | No |
 
-- Serialize lifecycle/lens commands. Coalesce sliders locally only before wire ID assignment and only within the same camera, control and generation. Every transmitted request receives one terminal result or times out.
-- G1 defines a bounded duplicate-response cache scoped to authenticated connection generation. Duplicate identical request IDs return cached terminal result without reapplying; same ID with changed content returns an error. Reconnect uses a new generation; never blindly replay pending mutations.
-- Proposed timing defaults for G1 tests: ping every 2 s, phone lease expiry after 6 s without valid authenticated heartbeat, command deadline 5 s, start/stop deadline 10 s. Use monotonic clocks; malformed/unauthenticated traffic never renews the lease.
-- Proposed reconnect budget: at most 5 attempts with 1/2/4/8/8 s base delays and bounded jitter. Cancellation is immediate; exhausted budget returns Disconnected. Successful reconnection establishes a new generation and invalidates the old lease; the phone releases any old-generation capture before reporting Ready. Only then refresh capabilities/effective state and return Ready without capture (D04). Old-generation heartbeats and media credentials cannot renew or access the new session.
-- Stop cancels in-flight start and invalidates stale callbacks. Local startup/decoder failure after a remote start must enter stop cleanup. If remote release cannot be confirmed, abandon the lease and cease its heartbeats; report Disconnected rather than Ready. Process death releases local resources and phone watchdog releases capture. Pairing cancellation/expiry cleans all ephemeral state. Revocation closes both control and media.
-- Minimum error taxonomy: unsupported_version, unauthenticated, forbidden, busy, invalid_payload, unsupported_control, stale_capabilities, invalid_state, timeout, permission_denied, media_failure, internal. G1 freezes exact shapes, directions and retry rules.
+---
 
-## Parser and resource limits
+## 4. Timing Constants and Lifecycle Invariants
 
-Proposed G1 defaults: 64 KiB maximum control message, bounded JSON depth, 32 pending commands per peer and explicit oversized/busy errors. G0 measures and fixes MJPEG maximum part size, parser buffered bytes, read timeout and total pipeline memory budget for supported modes. Parse multipart boundaries incrementally; reject corrupt/truncated/oversized input without unbounded buffering. Do not let untrusted media descriptors redirect to arbitrary hosts or local resources: bind to the authenticated peer and negotiated endpoint policy.
+* **Ping Interval:** Every 2.0 s from desktop.
+* **Lease Expiry:** 6.0 s without authenticated heartbeat $\rightarrow$ phone watchdog stops Camera2 capture immediately.
+* **Command Deadline:** 5.0 s.
+* **Session Start/Stop Deadline:** 10.0 s.
+* **Reconnect Budget:** Maximum 5 attempts (backoff: 1s, 2s, 4s, 8s, 8s with jitter).
+* **Generation Isolation:** Every reconnection creates a monotonically incremented connection generation. Stale generation completions, delayed events, and old-generation heartbeats are rejected immediately.
+* **Idempotency:** Start and stop commands are idempotent. Duplicate request IDs with identical content return cached response; duplicate request IDs with changed content return `invalid_payload`.
 
-## Contract acceptance (G1)
+---
 
-Shared fixtures must cover every message kind, required IDs/payloads, malformed/oversized data, wrong direction, unsupported versions, unknown controls, out-of-range/device-specific values, manual exposure atomicity, duplicate IDs, changed duplicate content, expired/replayed pairing, unauthenticated media, revoked peers, delayed events and stale generations. Two mandatory G1 semantic regressions: (1) stop times out while the control socket remains healthy—lease heartbeats cease, UI stays Disconnected and remote capture expires; (2) reconnect succeeds before old lease expiry—old capture and media authorization end before Ready, and delayed old-generation heartbeats/callbacks cannot revive them. Schema validation alone cannot prove temporal or capability semantics; both Kotlin and Rust must execute the same semantic vectors. TypeScript consumes the same names/units without owning device logic. See [roadmap](ROADMAP.md) for paths and dependencies.
+## 5. Parser and Resource Limits
+
+* **Max Control Message Size:** 64 KiB.
+* **Max Pending Commands:** 32 in-flight requests per peer.
+* **Multipart MJPEG Part Boundary:** Incremental parsing with bounded buffer; drop oldest frame on slow consumer (queue bound $\le 2$ frames).

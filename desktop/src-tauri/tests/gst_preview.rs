@@ -98,3 +98,27 @@ fn fake_sink_pipeline_consumes_three_frames_and_stop_releases() {
     assert!(!ctrl.active());
     assert!(!fifo.exists());
 }
+
+#[test]
+fn h264_fake_sink_pipeline_starts_and_stops_cleanly() {
+    use camapro_scope_lib::platform::linux::gst_preview::CodecMode;
+
+    let fifo = unique_fifo("h264-drain");
+    let _ = std::fs::remove_file(&fifo);
+
+    let mut ctrl = GstPreviewController::default();
+    ctrl.start_with_codec(fifo.to_str().unwrap(), SinkMode::Fake, CodecMode::H264)
+        .unwrap();
+
+    assert!(ctrl.active());
+    assert!(fifo.exists());
+
+    let fake_nal = &[0u8, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f];
+    let accepted = ctrl.write(fake_nal);
+    assert!(accepted);
+
+    ctrl.stop();
+    assert!(!ctrl.active());
+    assert!(!fifo.exists());
+}
+

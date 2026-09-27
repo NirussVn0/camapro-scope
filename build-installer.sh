@@ -111,6 +111,7 @@ detect_jdk() {
   fi
   # Search known JDK locations
   local candidates=(
+    "${HOME}/.jdks/jdk-21.0.12.1+1"
     "/home/nirussvn0/Android/jdk/jdk-21.0.12.1+1"
     "${HOME}/Android/jdk/jdk-21.0.12.1+1"
     "/opt/android-studio/jbr"
@@ -124,8 +125,8 @@ detect_jdk() {
       return 0
     fi
   done
-  # Wildcard search for user android jdk
-  for cand in "${HOME}/Android/jdk"/*; do
+  # Wildcard search for user android jdk or .jdks
+  for cand in "${HOME}/.jdks"/* "${HOME}/Android/jdk"/*; do
     if [ -x "$cand/bin/javac" ]; then
       export JAVA_HOME="$cand"
       export PATH="$JAVA_HOME/bin:$PATH"
@@ -171,6 +172,10 @@ build_desktop() {
   STAGE=$(mktemp -d)
   mkdir -p "$STAGE/bin" "$STAGE/share/applications" "$STAGE/share/icons/hicolor/256x256/apps"
   cp "$BIN" "$STAGE/bin/camapro-scope"
+  CTL_BIN="desktop/src-tauri/target/release/camaproctl"
+  if [ -x "$CTL_BIN" ]; then
+    cp "$CTL_BIN" "$STAGE/bin/camaproctl"
+  fi
   cp "$ROOT_DIR/desktop/src-tauri/icons/128x128.png" "$STAGE/share/icons/hicolor/256x256/apps/camapro-scope.png"
 
   cat > "$STAGE/share/applications/camapro-scope.desktop" <<'EOF'
@@ -184,16 +189,20 @@ EOF
 
   cat > "$STAGE/install.sh" <<'EOF'
 #!/usr/bin/env bash
-# Install into ~/.local (bin + desktop entry + icon). Uninstall: delete the 3 files listed.
+# Install into ~/.local (bin + desktop entry + icon). Uninstall: delete the files listed.
 set -eu
 cd "$(dirname "$0")"
 PREFIX="${1:-$HOME/.local}"
 mkdir -p "$PREFIX/bin" "$PREFIX/share/applications" "$PREFIX/share/icons/hicolor/256x256/apps"
 cp bin/camapro-scope "$PREFIX/bin/"
+if [ -f bin/camaproctl ]; then
+  cp bin/camaproctl "$PREFIX/bin/"
+  echo "Installed: $PREFIX/bin/camaproctl"
+fi
 cp share/applications/camapro-scope.desktop "$PREFIX/share/applications/"
 cp share/icons/hicolor/256x256/apps/camapro-scope.png "$PREFIX/share/icons/hicolor/256x256/apps/"
 echo "Installed: $PREFIX/bin/camapro-scope"
-echo "Remove:    rm $PREFIX/bin/camapro-scope $PREFIX/share/applications/camapro-scope.desktop $PREFIX/share/icons/hicolor/256x256/apps/camapro-scope.png"
+echo "Remove:    rm -f $PREFIX/bin/camapro-scope $PREFIX/bin/camaproctl $PREFIX/share/applications/camapro-scope.desktop $PREFIX/share/icons/hicolor/256x256/apps/camapro-scope.png"
 EOF
   chmod +x "$STAGE/install.sh"
 
@@ -250,10 +259,15 @@ fi
 echo ""
 echo "==> Generating SHA256 checksums..."
 cd "$ROOT_DIR/dist"
-rm -f SHA256SUMS.txt
-sha256sum camapro-scope-*.tar.gz *.apk > SHA256SUMS.txt
-cat SHA256SUMS.txt
-cd "$ROOT_DIR"
+  files=()
+  for f in camapro-scope-*.tar.gz *.apk; do
+    [ -f "$f" ] && files+=("$f")
+  done
+  if [ ${#files[@]} -gt 0 ]; then
+    sha256sum "${files[@]}" > SHA256SUMS.txt
+    cat SHA256SUMS.txt
+  fi
+  cd "$ROOT_DIR"
 
 echo ""
 echo "=========================================="
@@ -285,7 +299,7 @@ if [ "$DO_RELEASE" = true ]; then
     gh release upload "$RELEASE_TAG" "${RELEASE_FILES[@]}" --clobber
   else
     echo "--> Creating new release $RELEASE_TAG..."
-    CMD=(gh release create "$RELEASE_TAG" "${RELEASE_FILES[@]}" --title "$RELEASE_TITLE")
+    CMD=(gh release create "$RELEASE_TAG" "${RELEASE_FILES[@]}" --title "$RELEASE_TITLE" --latest)
     if [ -n "$NOTES_FILE" ] && [ -f "$NOTES_FILE" ]; then
       CMD+=(--notes-file "$NOTES_FILE")
     elif [ -n "$NOTES" ]; then

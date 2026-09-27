@@ -214,4 +214,70 @@ impl CommandDispatcher {
     pub fn preview_active(&self) -> bool {
         self.preview_session.is_some()
     }
+
+    /// Dispatch live camera control changes to the phone via POST /control.
+    /// Invariant D05: One desktop command authority; mutual typed response.
+    pub fn camera_set(
+        &mut self,
+        host: &str,
+        port: u16,
+        token: &str,
+        payload: CameraSetPayload,
+    ) -> Result<serde_json::Value, String> {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let addr = format!("{host}:{port}");
+        let socket_addr = addr
+            .parse()
+            .map_err(|e| format!("Invalid address {addr}: {e}"))?;
+
+        let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(3000))
+            .map_err(|e| format!("Cannot reach phone at {addr}: {e}"))?;
+
+        stream.set_read_timeout(Some(Duration::from_millis(3000))).ok();
+        stream.set_write_timeout(Some(Duration::from_millis(3000))).ok();
+
+        let req_body = serde_json::json!({
+            "v": 1,
+            "id": self.generation() + 1,
+            "type": "camera.set",
+            "payload": payload
+        });
+        let body_str = req_body.to_string();
+
+        let req = format!(
+            "POST /control HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             X-Camapro-Token: {token}\r\n\
+             Connection: close\r\n\r\n\
+             {body_str}",
+            body_str.len()
+        );
+
+        stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+
+        let mut resp = String::new();
+        stream.read_to_string(&mut resp).map_err(|e| e.to_string())?;
+
+        if let Some(idx) = resp.find("\r\n\r\n") {
+            let (headers, body_part) = resp.split_at(idx + 4);
+            if headers.starts_with("HTTP/1.1 200") {
+                let parsed: serde_json::Value = serde_json::from_str(body_part.trim())
+                    .map_err(|e| format!("Invalid JSON response: {e}"))?;
+                if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                    Ok(parsed)
+                } else {
+                    Err(format!("Phone returned error: {parsed}"))
+                }
+            } else {
+                Err(format!("Phone returned error status: {headers}"))
+            }
+        } else {
+            Err(format!("Invalid HTTP response: {resp}"))
+        }
+    }
 }

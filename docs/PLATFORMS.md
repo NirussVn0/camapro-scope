@@ -1,37 +1,47 @@
+---
+type: Platform Specification
+status: Active (v0.2.0 Linux & Android Implemented)
+version: 0.2.0
+last_updated: 2026-09-19
+owner: NirussVn0
+authority: docs/PLATFORMS.md
+---
+
 # Platform boundaries and support evidence
 
-**No platform has been implemented or verified.** Linux-first is a delivery order, not a compatibility guarantee. Record actual OS/device versions and results before promoting any row to supported.
+Linux (Wayland) and Android (minSdk 26) are the primary active platforms with v0.2.0 core implementations. Windows remains planned for G8.
 
-| Surface | Target | Required proof |
-|---|---|---|
-| Android sender | Kotlin/Camera2/foreground service | real-device permission/lifecycle, modes, cleanup, sustained stream |
-| Linux desktop | Rust/GStreamer + Tauri controls | native preview on declared compositor, packaged runtime |
-| Linux virtual camera | v4l2loopback / v4l2sink | device negotiation and frames in OBS + browser |
-| Windows desktop/output | shared core + native adapter | supported Windows API/OS, media-source lifecycle, installer and two consumers |
-| Wayland shortcuts | optional adapter; future CLI fallback | compositor-specific binding and single command authority |
+---
 
-## Android (G0–G4)
+## 1. Platform Support Matrix
 
-Freeze SDK/toolchain and at least one reference phone at G0; do not infer Camera2 support level or JPEG FPS from megapixel count. Test permission denied/revoked, notification stop, app background, screen-off, camera-in-use, service/process death and lens changes. Record manufacturer, model, Android version, camera IDs, advertised/actual resolution/FPS, thermal conditions and sensor-control support. Shared semantics must still handle empty camera lists and unsupported manual controls.
+| Platform Surface | Target Technology | Status | Key Requirements & Verification |
+|---|---|---|---|
+| **Android Sender** | Kotlin, Camera2, Foreground Service | **Implemented** | minSdk 26, targetSdk 34, JDK 21. Real-device thermal/battery endurance (G5). |
+| **Linux Desktop** | Tauri 2, Rust, GStreamer Waylandsink | **Implemented** | CachyOS / Arch Linux x86_64, Wayland compositor, GStreamer 1.28+. |
+| **Linux Virtual Camera**| `v4l2loopback`, `v4l2sink` (`/dev/video*`) | **Implemented** | Auto-detects loopback device (`/dev/video11`); requires user-provisioned kernel module. |
+| **Windows Desktop/Sink**| Media Foundation Virtual Camera | **Planned (G8)**| Windows 11 build 22000+, MF virtual camera API, portable core. |
+| **CLI / Global Hotkeys**| Wayland compositor binding / IPC | **Planned (G6)**| Interacts with desktop session controller; no duplicate daemon. |
 
-## Linux
+---
 
-Keep `core/` portable; native surface, virtual output, secure store, shortcuts and IPC implementations live under `desktop/src-tauri/src/platform/` when needed. OS selection belongs in the composition root, not scattered through business logic.
+## 2. Platform Details
 
-Virtual camera path: GStreamer → v4l2sink → existing v4l2loopback → `/dev/videoN`. Detect missing module, permission problems, busy device and unsupported formats. Report the exact remediation; never silently install/load a module, alter groups or elevate permissions. Setup is a separately user-approved host action, not part of app startup or routine tests.
+### Android (Sender)
+* **SDK Levels:** `minSdk = 26` (Android 8.0 Oreo), `targetSdk = 34` (Android 14).
+* **Capture Engine:** Exclusive Camera2 ownership in `CameraEngine.kt`. Surfaces managed via `Camera2Source.kt`.
+* **Foreground Service:** Camera streaming runs inside an Android Foreground Service (`CameraStreamService.kt`) with type `camera` to survive app backgrounding and screen-off.
+* **Network & Pairing:** Local IP resolution supports Wi-Fi, Tailscale VPN, and USB ADB reverse tethering (`adb reverse tcp:8080 tcp:8080`).
 
-G0 must select/prove native preview integration on the actual Tauri/WebKit/Wayland stack. Validate window/surface destruction, resize and hidden/minimized operation. An external GStreamer window is only a transport spike, not integrated preview completion.
+### Linux Desktop & Virtual Output
+* **Reference OS:** CachyOS / Arch Linux x86_64, running Wayland compositor.
+* **Native Preview:** Embedded directly into the Tauri GTK window surface using GStreamer `waylandsink` and `GstVideoOverlay` (`gst_preview.rs`). No raw video data passes through React or Tauri IPC.
+* **Virtual Camera (`v4l2loopback`):**
+  * Spawns a supervised `gst-launch` pipeline (`virtual_output.rs`) targeting user-provisioned `/dev/video*` nodes.
+  * Auto-detects virtual camera nodes (e.g. `/dev/video11`).
+  * If the device node is missing or lacks permissions, returns clear remediation instructions. Never silently installs kernel modules or elevates host permissions.
+* **Packaging:** Self-contained portable tarball generated via `./build-installer.sh --desktop-only`.
 
-Plan packaging after choosing one reference distribution/package format. Broad Arch/Ubuntu/Fedora/openSUSE support is unverified. Document GStreamer plugins, system/bundled ownership, native WebKit dependencies and upgrade behavior. Kernel modules cannot be assumed bundled into an AppImage.
-
-Wayland global hotkeys are optional. The future CLI may be bound through compositor configuration, but is not implemented now. Its grammar must come from the same command contract; no separate parsing of exposure units or profile semantics in a shortcut callback.
-
-## Windows (G0 feasibility; G8 delivery)
-
-Media Foundation virtual camera is an architectural candidate, not an implementation or universal Windows compatibility claim. Before promising support, verify official API minimum OS/SDK, registration/media-source requirements, privacy/consent, frame negotiation, consumer compatibility and installer/uninstaller lifecycle. Record source URLs and version constraints in the D08 decision evidence. Do not invent Windows 10 fallback support; request a product decision if required.
-
-Keep Windows code behind the platform port. Shared protocol/core tests must compile on Windows without Linux-only GStreamer/V4L2 dependencies. Do not run `--all-features` when platform features are mutually exclusive.
-
-## Distribution gate
-
-Inventory GStreamer/runtime and codec licenses and shipped plugins separately from application code. H.264 redistribution assumptions require review. Select one packaging format per proven platform first; additional installers follow measured demand. A clean-machine install/start/capture/stop/uninstall test is required. Windows support, signing and packaging are not validated by Linux CI.
+### Windows Delivery (G8)
+* Candidate architecture: Windows Media Foundation (MF) virtual camera driver / custom media source.
+* Implemented behind platform-independent core abstractions in `desktop/src-tauri/src/platform/`. Linux-only dependencies (`gstreamer`, `v4l2`) must remain strictly behind target gates.

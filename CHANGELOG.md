@@ -1,5 +1,13 @@
 # Docs changelog
 
+## v0.3.0 — 2026-09-27
+
+- **Live Camera Controls (G4)**: Real-time Camera2 dynamic capture request updates on Android (EV compensation, manual ISO sensitivity, manual shutter time, manual focus diopters) synchronized with Tauri live sliders over authenticated `POST /control`.
+- **Standalone CLI `camaproctl` (G6)**: Dedicated headless CLI tool for checking phone status, streaming preview via Wayland GStreamer, virtual camera testing, camera control commands, and atomic profile CRUD. Packaged into Linux desktop distribution.
+- **H.264 Hardware Streaming (G7)**: Android `MediaCodec` low-latency hardware video encoder (`H264Encoder.kt`) streaming Annex-B NAL units via `GET /stream.h264`, with desktop GStreamer H.264 decode pipeline (`h264parse ! avdec_h264`).
+- **Local Skills & Docs Governance**: Relocated operational skills to `.agents/skills/` and established authoritative documentation governance index in `docs/README.md`.
+- **Packaging & JDK Auto-detection**: Enhanced `build-installer.sh` to auto-detect portable JDK 21 LTS and include `camaproctl` in user-space installation.
+
 ## v0.2.0 — 2026-09-17
 
 - **Desktop UI**: Redesigned UI faithful to brief (navbar, sidebars, StageFrame, brand icon, color palette per DESIGN.md).

@@ -84,6 +84,34 @@ export function App() {
   const [mirror, setMirror] = useState(false);
   const [infoOpen, setInfoOpen] = useState(true);
 
+  // Live Camera Controls (Gate G4)
+  const [ev, setEv] = useState(0);
+  const [iso, setIso] = useState("auto");
+  const [shutter, setShutter] = useState("auto");
+  const [focus, setFocus] = useState("auto");
+  const [controlFeedback, setControlFeedback] = useState<string | null>(null);
+
+  const applyCameraControls = async (changes: Record<string, any>) => {
+    if (!token) return;
+    try {
+      await invoke("camera_set", {
+        host,
+        port,
+        token,
+        payload: {
+          cameraId: camera === "back" ? "0" : "1",
+          capabilityRevision: 1,
+          changes,
+        },
+      });
+      setControlFeedback("✓ Applied");
+      setTimeout(() => setControlFeedback(null), 1500);
+    } catch (e) {
+      setControlFeedback(`❌ ${String(e)}`);
+      setTimeout(() => setControlFeedback(null), 3000);
+    }
+  };
+
   const { sessionState } = useSession();
   const {
     outputState,
@@ -307,6 +335,134 @@ export function App() {
               />
             </span>
           </button>
+        </Panel>
+
+        {/* Live Camera Controls (Gate G4) */}
+        <Panel className="flex flex-col gap-2 p-2.5">
+          <div className="flex items-center justify-between">
+            <Label>Controls</Label>
+            {controlFeedback && (
+              <span className="text-[10px] text-[#4ade80] font-mono">
+                {controlFeedback}
+              </span>
+            )}
+          </div>
+          <div className="flex flex-col gap-1">
+            <div className="flex justify-between text-[10px] text-[#94a3b8]">
+              <span>Exposure (EV)</span>
+              <span className="font-mono text-[#f5f7fa]">{ev > 0 ? `+${ev}` : ev}</span>
+            </div>
+            <input
+              type="range"
+              min={-4}
+              max={4}
+              step={1}
+              value={ev}
+              onChange={(e) => {
+                const val = Number(e.target.value);
+                setEv(val);
+                void applyCameraControls({ exposureCompensationSteps: val });
+              }}
+              className="w-full accent-[#3b82f6] cursor-pointer"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] text-[#94a3b8]" htmlFor="ctrl-iso">
+                ISO
+              </label>
+              <select
+                id="ctrl-iso"
+                className={selectCls}
+                value={iso}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setIso(val);
+                  if (val === "auto") {
+                    void applyCameraControls({ aeEnabled: true });
+                  } else {
+                    void applyCameraControls({ iso: Number(val), aeEnabled: false });
+                  }
+                }}
+              >
+                <option value="auto">Auto</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+                <option value="400">400</option>
+                <option value="800">800</option>
+                <option value="1600">1600</option>
+                <option value="3200">3200</option>
+              </select>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] text-[#94a3b8]" htmlFor="ctrl-shutter">
+                Shutter
+              </label>
+              <select
+                id="ctrl-shutter"
+                className={selectCls}
+                value={shutter}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setShutter(val);
+                  if (val === "auto") {
+                    void applyCameraControls({ aeEnabled: true });
+                  } else {
+                    void applyCameraControls({ shutterNanos: Number(val), aeEnabled: false });
+                  }
+                }}
+              >
+                <option value="auto">Auto</option>
+                <option value="33333333">1/30s</option>
+                <option value="16666666">1/60s</option>
+                <option value="8333333">1/120s</option>
+                <option value="4000000">1/250s</option>
+                <option value="2000000">1/500s</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1">
+            <div className="flex justify-between text-[10px] text-[#94a3b8]">
+              <span>Focus</span>
+              <span className="font-mono text-[#f5f7fa]">{focus === "auto" ? "Auto" : `${focus} D`}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={0}
+                max={10}
+                step={0.5}
+                disabled={focus === "auto"}
+                value={focus === "auto" ? 0 : Number(focus)}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  setFocus(String(val));
+                  void applyCameraControls({ focusDistanceDiopters: val });
+                }}
+                className="w-full accent-[#3b82f6] cursor-pointer disabled:opacity-40"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (focus === "auto") {
+                    setFocus("0.0");
+                    void applyCameraControls({ focusDistanceDiopters: 0.0 });
+                  } else {
+                    setFocus("auto");
+                    void applyCameraControls({ aeEnabled: true });
+                  }
+                }}
+                className={cn(
+                  "rounded border px-1.5 py-0.5 text-[10px] transition-colors",
+                  focus === "auto"
+                    ? "border-[#60a5fa]/40 bg-[#60a5fa]/15 text-[#60a5fa]"
+                    : "border-white/10 text-[#94a3b8] hover:bg-white/5",
+                )}
+              >
+                Auto
+              </button>
+            </div>
+          </div>
         </Panel>
 
         {/* Output Panel with Auto-detected Virtual Devices */}

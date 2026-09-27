@@ -38,6 +38,14 @@ pub enum SinkMode {
     Fake,
 }
 
+/// Video codec format for decode pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CodecMode {
+    #[default]
+    Mjpeg,
+    H264,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GstPreviewError {
     AlreadyRunning,
@@ -95,6 +103,16 @@ impl GstPreviewController {
     /// successful O_NONBLOCK writer-open), so a pipeline that dies on
     /// startup surfaces as `SpawnFailed` instead of a silent black fifo.
     pub fn start(&mut self, fifo_path: &str, sink: SinkMode) -> Result<(), GstPreviewError> {
+        self.start_with_codec(fifo_path, sink, CodecMode::Mjpeg)
+    }
+
+    /// Create the fifo and spawn the decode pipeline on it with declared codec.
+    pub fn start_with_codec(
+        &mut self,
+        fifo_path: &str,
+        sink: SinkMode,
+        codec: CodecMode,
+    ) -> Result<(), GstPreviewError> {
         if self.active() {
             return Err(GstPreviewError::AlreadyRunning);
         }
@@ -112,7 +130,7 @@ impl GstPreviewController {
             ));
         }
 
-        let mut child = match spawn_gst(fifo_path, sink) {
+        let mut child = match spawn_gst(fifo_path, sink, codec) {
             Ok(child) => child,
             Err(e) => {
                 let _ = std::fs::remove_file(fifo);
@@ -220,23 +238,35 @@ impl Drop for GstPreviewController {
     }
 }
 
-fn spawn_gst(fifo_path: &str, sink: SinkMode) -> std::io::Result<Child> {
+fn spawn_gst(fifo_path: &str, sink: SinkMode, codec: CodecMode) -> std::io::Result<Child> {
     let sink_element = match sink {
         SinkMode::Wayland => "waylandsink",
         SinkMode::Fake => "fakesink",
     };
-    Command::new("gst-launch-1.0")
-        .arg("-q")
+    let mut cmd = Command::new("gst-launch-1.0");
+    cmd.arg("-q")
         .arg("filesrc")
         .arg(format!("location={fifo_path}"))
+        .arg("!");
+
+    match codec {
+        CodecMode::Mjpeg => {
+            cmd.arg("jpegparse")
+                .arg("!")
+                .arg("jpegdec")
+                .arg("!");
+        }
+        CodecMode::H264 => {
+            cmd.arg("h264parse")
+                .arg("!")
+                .arg("avdec_h264")
+                .arg("!");
+        }
+    }
+
+    cmd.arg("videoconvert")
         .arg("!")
-        .arg("jpegparse")
-        .arg("!")
-        .arg("jpegdec")
-        .arg("!")
-        .arg("videoconvert")
-        .arg("!")
-        // Measured: jpegdec emits per-frame variable caps; the fully-fixed
+        // Measured: jpegdec/avdec_h264 emits variable caps; the fully-fixed
         // I420 filter keeps negotiation stable across the whole stream.
         .arg("video/x-raw,format=I420,framerate=30/1")
         .arg("!")

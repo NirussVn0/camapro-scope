@@ -155,17 +155,17 @@ fn check_network_environment() -> NetworkDiagnostic {
     }
 }
 
-/// G4 structural prep: accepts typed camera.set payload per protocol schema.
-/// Returns Ok but does nothing until WSS transport + Android handler exist.
-/// ponytail: inert stub; wire when physical phone available.
+/// G4 live camera controls: sends typed camera.set payload to phone over POST /control.
 #[tauri::command]
-fn camera_set(_state: State<AppState>, payload: CameraSetPayload) -> Result<(), String> {
-    // Validate payload shape (serde already did); log for future wiring.
-    eprintln!(
-        "camera.set received (inert): camera={} rev={} changes={}",
-        payload.camera_id, payload.capability_revision, payload.changes
-    );
-    Ok(())
+fn camera_set(
+    state: State<AppState>,
+    host: String,
+    port: u16,
+    token: String,
+    payload: CameraSetPayload,
+) -> Result<serde_json::Value, String> {
+    let mut dispatcher = state.0.lock().map_err(|_| "state poisoned")?;
+    dispatcher.camera_set(&host, port, &token, payload)
 }
 
 /// Generate real 2-way pairing session with local IP discovery and HTTP callback.

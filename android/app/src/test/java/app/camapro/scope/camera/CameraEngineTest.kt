@@ -59,6 +59,14 @@ class CameraEngineTest {
             frameCallback = null
         }
 
+        override fun setControl(changes: Map<String, Any?>): Boolean {
+            setControlChanges.add(changes)
+            return setControlSuccess
+        }
+
+        var setControlSuccess = true
+        val setControlChanges = mutableListOf<Map<String, Any?>>()
+
         override fun close() {
             closeCount.incrementAndGet()
             frameCallback = null
@@ -156,5 +164,21 @@ class CameraEngineTest {
     fun `setControl accepts valid changes structurally`() {
         val result = engine.setControl("0", 3, mapOf("exposureCompensationSteps" to 2))
         assertTrue(result.isSuccess)
+        assertEquals(1, fakeSource.setControlChanges.size)
+        assertEquals(2, fakeSource.setControlChanges[0]["exposureCompensationSteps"])
+    }
+
+    @Test
+    fun `setControl rejects unsupported controls fail-closed`() {
+        val result = engine.setControl("0", 3, mapOf("exposureCompensationSteps" to 2, "unsupportedFilter" to "sepia"))
+        assertTrue(result.isFailure)
+        assertEquals(0, fakeSource.setControlChanges.size)
+    }
+
+    @Test
+    fun `setControl fails when camera source rejects`() {
+        fakeSource.setControlSuccess = false
+        val result = engine.setControl("0", 3, mapOf("iso" to 400))
+        assertTrue(result.isFailure)
     }
 }

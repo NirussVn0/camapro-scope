@@ -18,6 +18,8 @@ interface CameraSource {
         onFrame: (ByteArray) -> Unit
     ): Boolean
 
+    fun setControl(changes: Map<String, Any?>): Boolean = true
+
     fun stopCapture()
 
     fun close()

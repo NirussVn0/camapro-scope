@@ -29,6 +29,7 @@ class Camera2Source(
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
+    private var captureRequestBuilder: CaptureRequest.Builder? = null
     private var imageReader: android.media.ImageReader? = null
 
     private var backgroundThread: HandlerThread? = null
@@ -127,7 +128,7 @@ class Camera2Source(
             val surfaces = mutableListOf<Surface>(reader.surface)
             previewSurface?.let { if (it.isValid) surfaces.add(it) }
 
-            val captureRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(reader.surface)
                 previewSurface?.let { if (it.isValid) addTarget(it) }
 
@@ -140,6 +141,7 @@ class Camera2Source(
                     set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
                 }
             }
+            captureRequestBuilder = builder
 
             var sessionConfigured = false
             val sessionLock = Object()
@@ -152,7 +154,7 @@ class Camera2Source(
                         synchronized(lock) {
                             captureSession = session
                             try {
-                                session.setRepeatingRequest(captureRequestBuilder.build(), null, handler)
+                                session.setRepeatingRequest(builder.build(), null, handler)
                             } catch (_: Exception) {
                             }
                         }
@@ -183,6 +185,59 @@ class Camera2Source(
         }
     }
 
+    override fun setControl(changes: Map<String, Any?>): Boolean = synchronized(lock) {
+        val builder = captureRequestBuilder ?: return false
+        val session = captureSession ?: return false
+        val handler = backgroundHandler ?: return false
+
+        if (changes.containsKey("exposureCompensationSteps")) {
+            val steps = (changes["exposureCompensationSteps"] as? Number)?.toInt()
+            if (steps != null) {
+                builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, steps)
+            }
+        }
+
+        if (changes.containsKey("aeEnabled")) {
+            val aeOn = changes["aeEnabled"] as? Boolean ?: true
+            if (aeOn) {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            } else {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            }
+        }
+
+        if (changes.containsKey("iso")) {
+            val iso = (changes["iso"] as? Number)?.toInt()
+            if (iso != null && iso > 0) {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                builder.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+            }
+        }
+
+        if (changes.containsKey("shutterNanos")) {
+            val shutter = (changes["shutterNanos"] as? Number)?.toLong()
+            if (shutter != null && shutter > 0) {
+                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, shutter)
+            }
+        }
+
+        if (changes.containsKey("focusDistanceDiopters")) {
+            val focus = (changes["focusDistanceDiopters"] as? Number)?.toFloat()
+            if (focus != null && focus >= 0f) {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focus)
+            }
+        }
+
+        return try {
+            session.setRepeatingRequest(builder.build(), null, handler)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     override fun stopCapture(): Unit = synchronized(lock) {
         try {
             captureSession?.stopRepeating()
@@ -191,6 +246,7 @@ class Camera2Source(
         } catch (_: Exception) {
         } finally {
             captureSession = null
+            captureRequestBuilder = null
         }
 
         try {

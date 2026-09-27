@@ -27,7 +27,9 @@ class MjpegHttpServer(
     private val frameSupplier: () -> ByteArray?,
     private val token: String,
     requestedPort: Int = DEFAULT_PORT,
-    private val bindAddress: String = "0.0.0.0"
+    private val bindAddress: String = "0.0.0.0",
+    var controlHandler: ((String) -> String)? = null,
+    var h264Supplier: (() -> ByteArray?)? = null
 ) {
     private val bindPort = requestedPort
     companion object {
@@ -133,6 +135,79 @@ class MjpegHttpServer(
             return
         }
 
+        if (method == "POST" && path == "/control") {
+            val requestToken = headersValue(lines, TOKEN_HEADER)
+            if (requestToken != token) {
+                val err = "{\"v\":1,\"type\":\"error\",\"ok\":false,\"error\":{\"code\":\"unauthenticated\",\"message\":\"Invalid or missing token\",\"retryable\":false}}\r\n"
+                respondJson(sock, 401, "Unauthorized", err)
+                return
+            }
+
+            val contentLength = headersValue(lines, "Content-Length")?.toIntOrNull() ?: 0
+            if (contentLength <= 0 || contentLength > 65536) {
+                val err = "{\"v\":1,\"type\":\"error\",\"ok\":false,\"error\":{\"code\":\"invalid_payload\",\"message\":\"Invalid Content-Length\",\"retryable\":false}}\r\n"
+                respondJson(sock, 400, "Bad Request", err)
+                return
+            }
+
+            val bodyBytes = ByteArray(contentLength)
+            var readBytes = 0
+            while (readBytes < contentLength) {
+                val r = input.read(bodyBytes, readBytes, contentLength - readBytes)
+                if (r == -1) break
+                readBytes += r
+            }
+            val body = String(bodyBytes, 0, readBytes, Charsets.UTF_8)
+            val handler = controlHandler
+            if (handler == null) {
+                val err = "{\"v\":1,\"type\":\"error\",\"ok\":false,\"error\":{\"code\":\"internal\",\"message\":\"No control handler configured\",\"retryable\":false}}\r\n"
+                respondJson(sock, 500, "Internal Server Error", err)
+                return
+            }
+
+            val resJson = handler(body)
+            respondJson(sock, 200, "OK", resJson)
+            return
+        }
+
+        if (method == "GET" && path == "/stream.h264") {
+            val queryToken = query.split("&").firstOrNull { it.startsWith("token=") }?.removePrefix("token=")
+            val requestToken = headersValue(lines, TOKEN_HEADER) ?: queryToken
+
+            if (requestToken != token) {
+                respondSimple(sock, input, "401 Unauthorized")
+                return
+            }
+
+            val response = "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: video/x-h264\r\n" +
+                    "Cache-Control: no-cache, private\r\n" +
+                    "Connection: close\r\n\r\n"
+            val out = sock.getOutputStream()
+            out.write(response.toByteArray(US_ASCII))
+            out.flush()
+
+            val supplier = h264Supplier ?: frameSupplier
+            while (running) {
+                val frame = supplier()
+                if (frame == null) {
+                    sock.soTimeout = IDLE_POLL_MS
+                    try {
+                        if (input.read() == -1) return
+                    } catch (_: java.net.SocketTimeoutException) {
+                    }
+                    continue
+                }
+                try {
+                    out.write(frame)
+                    out.flush()
+                } catch (_: IOException) {
+                    return
+                }
+            }
+            return
+        }
+
         if (method != "GET" || path != "/stream") {
             respondSimple(sock, input, "404 Not Found")
             return
@@ -200,6 +275,22 @@ class MjpegHttpServer(
         val body = status.toByteArray(US_ASCII)
         val resp = "HTTP/1.1 $status\r\n" +
                 "Content-Type: text/plain; charset=us-ascii\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Connection: close\r\n\r\n"
+        try {
+            val out = sock.getOutputStream()
+            out.write(resp.toByteArray(US_ASCII))
+            out.write(body)
+            out.flush()
+        } catch (_: IOException) {
+        }
+    }
+
+    private fun respondJson(sock: Socket, statusCode: Int, statusText: String, json: String) {
+        val body = json.toByteArray(Charsets.UTF_8)
+        val resp = "HTTP/1.1 $statusCode $statusText\r\n" +
+                "Content-Type: application/json; charset=utf-8\r\n" +
+                "Access-Control-Allow-Origin: *\r\n" +
                 "Content-Length: ${body.size}\r\n" +
                 "Connection: close\r\n\r\n"
         try {

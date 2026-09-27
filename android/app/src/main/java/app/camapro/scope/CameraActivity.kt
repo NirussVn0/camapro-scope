@@ -532,7 +532,8 @@ class CameraActivity : ComponentActivity() {
         val s = MjpegHttpServer(
             frameSupplier = { queue.dequeue() },
             token = token,
-            bindAddress = "0.0.0.0"
+            bindAddress = "0.0.0.0",
+            controlHandler = { jsonStr -> processControlMessage(jsonStr) }
         )
         try {
             s.start()
@@ -623,6 +624,39 @@ class CameraActivity : ComponentActivity() {
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun processControlMessage(jsonStr: String): String {
+        return try {
+            val req = org.json.JSONObject(jsonStr)
+            val id = req.optLong("id", 0L)
+            val type = req.optString("type")
+            if (type != "camera.set") {
+                return "{\"v\":1,\"id\":$id,\"type\":\"error\",\"ok\":false,\"error\":{\"code\":\"invalid_payload\",\"message\":\"Unknown command type: $type\",\"retryable\":false}}\r\n"
+            }
+            val payload = req.optJSONObject("payload")
+                ?: return "{\"v\":1,\"id\":$id,\"type\":\"error\",\"ok\":false,\"error\":{\"code\":\"invalid_payload\",\"message\":\"Missing payload\",\"retryable\":false}}\r\n"
+            val cameraId = payload.optString("cameraId", "0")
+            val revision = payload.optInt("capabilityRevision", 0)
+            val changesObj = payload.optJSONObject("changes")
+                ?: return "{\"v\":1,\"id\":$id,\"type\":\"error\",\"ok\":false,\"error\":{\"code\":\"invalid_payload\",\"message\":\"Missing changes\",\"retryable\":false}}\r\n"
+
+            val changes = mutableMapOf<String, Any?>()
+            val keys = changesObj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                changes[k] = changesObj.get(k)
+            }
+
+            val src = cameraSource
+            if (src != null && src.setControl(changes)) {
+                "{\"v\":1,\"id\":$id,\"type\":\"response\",\"ok\":true,\"result\":{\"cameraId\":\"$cameraId\",\"applied\":$changesObj,\"revision\":$revision}}\r\n"
+            } else {
+                "{\"v\":1,\"id\":$id,\"type\":\"error\",\"ok\":false,\"error\":{\"code\":\"media_failure\",\"message\":\"Camera not streaming or control rejected\",\"retryable\":false}}\r\n"
+            }
+        } catch (e: Exception) {
+            "{\"v\":1,\"type\":\"error\",\"ok\":false,\"error\":{\"code\":\"invalid_payload\",\"message\":\"${e.message}\",\"retryable\":false}}\r\n"
+        }
+    }
 
     override fun onDestroy() {
         super.onDestroy()

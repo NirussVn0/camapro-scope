@@ -1,4 +1,18 @@
-# Đánh giá baseline và hướng cải tạo
+---
+type: Historical Technical Audit
+status: Superseded / Archived (Historical Reference)
+version: 0.1.0-pre
+audit_date: 2026-09-13
+last_updated: 2026-09-19
+owner: NirussVn0
+authority: Historical Baseline Record
+---
+
+# Đánh giá baseline và hướng cải tạo (Bản lưu trữ lịch sử)
+
+> [!NOTE]
+> **Tài liệu lưu trữ lịch sử:** Báo cáo này được thực hiện vào ngày 13/09/2026 khi dự án chưa có mã nguồn (chỉ có 9 file tài liệu và draft schema). Các vấn đề nêu trong báo cáo này đã được chuyển hoá và khắc phục hoàn toàn trong các Gate G0–G4 của dự án. Tài liệu được giữ lại làm dữ liệu đối chiếu lịch sử (historical context) theo `docs/DECISIONS.md:23`.
+
 
 Ngày kiểm tra: 2026-09-13. Phạm vi: toàn bộ 9 file authored ban đầu (README, CHANGELOG, năm docs, prompt, schema); không coi Git metadata là source ứng dụng. HEAD ban đầu: `151c1905603bbbfa4e01cd0280f5a68bf6ae58a6`, nhánh `master`, không có file tracked. Toàn bộ tài liệu/schema đã tồn tại ở dạng untracked trước lần chỉnh này. Vì vậy HEAD không đại diện nội dung được audit; evidence dưới đây chỉ baseline working tree. Bản sao trước sửa được giữ tạm tại `/tmp/camapro-baseline-j21uc5h6` trong phiên thực hiện, không phải artifact portable.
 

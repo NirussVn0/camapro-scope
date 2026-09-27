@@ -1,6 +1,6 @@
 [package]
 name = "camapro-scope"
-version = "0.2.0"
+version = "0.3.0"
 description = "Camapro Scope desktop controller (G1 skeleton)"
 edition = "2021"
 rust-version = "1.97"
@@ -8,6 +8,14 @@ rust-version = "1.97"
 [lib]
 name = "camapro_scope_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "camapro-scope"
+path = "src/main.rs"
+
+[[bin]]
+name = "camaproctl"
+path = "src/bin/camaproctl.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -74,10 +74,19 @@ class CameraEngine(private val cameraSource: CameraSource) {
         }
     }
 
+    companion object {
+        val SUPPORTED_CONTROLS = setOf(
+            "exposureCompensationSteps",
+            "aeEnabled",
+            "iso",
+            "shutterNanos",
+            "focusDistanceDiopters"
+        )
+    }
+
     /**
-     * G4 structural prep: apply a camera control change.
-     * ponytail: fake impl validates against capabilities; real Camera2
-     * CaptureRequest wiring deferred until physical phone available.
+     * G4 live controls: validate against protocol schema and apply to CameraSource.
+     * Fail-closed: unsupported controls are rejected immediately.
      */
     fun setControl(
         cameraId: String,
@@ -87,8 +96,14 @@ class CameraEngine(private val cameraSource: CameraSource) {
         if (changes.isEmpty()) {
             return Result.failure(IllegalArgumentException("changes must not be empty"))
         }
-        // Structural validation only — no wire transport yet.
-        // Real impl will map keys to CaptureRequest.Key and apply atomically.
+        val unsupported = changes.keys.filterNot { it in SUPPORTED_CONTROLS }
+        if (unsupported.isNotEmpty()) {
+            return Result.failure(IllegalArgumentException("Unsupported controls: $unsupported"))
+        }
+        val applied = cameraSource.setControl(changes)
+        if (!applied) {
+            return Result.failure(IllegalStateException("Failed to apply camera controls"))
+        }
         return Result.success(Unit)
     }
 }

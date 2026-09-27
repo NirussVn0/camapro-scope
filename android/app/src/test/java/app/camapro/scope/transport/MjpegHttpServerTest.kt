@@ -32,6 +32,22 @@ class MjpegHttpServerTest {
         return sock
     }
 
+    private fun post(port: Int, path: String, tokenHeader: String?, body: String, soTimeoutMs: Int = 5000): Socket {
+        val sock = Socket("127.0.0.1", port)
+        sock.soTimeout = soTimeoutMs
+        val bodyBytes = body.toByteArray(Charsets.UTF_8)
+        val req = StringBuilder("POST $path HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+        req.append("Content-Type: application/json\r\n")
+        req.append("Content-Length: ${bodyBytes.size}\r\n")
+        if (tokenHeader != null) req.append("X-Camapro-Token: $tokenHeader\r\n")
+        req.append("\r\n")
+        val out = sock.getOutputStream()
+        out.write(req.toString().toByteArray(US_ASCII))
+        out.write(bodyBytes)
+        out.flush()
+        return sock
+    }
+
     /** Reads until the terminating CRLF CRLF of an HTTP header block (max 4KB). */
     private fun readHttpHeaders(input: InputStream): String {
         val out = ByteArrayOutputStream()
@@ -246,6 +262,82 @@ class MjpegHttpServerTest {
             assertTrue(header, header.startsWith("HTTP/1.1 200 OK"))
             assertTrue(header, header.contains("application/json"))
             assertTrue(header, header.contains("Access-Control-Allow-Origin: *"))
+            sock.close()
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun controlEndpointWithoutTokenGets401() {
+        val server = startServer(token = "ctrlsecret") { null }
+        try {
+            val sock = post(server.port, "/control", tokenHeader = null, body = "{}")
+            val resp = readHttpHeaders(sock.getInputStream())
+            assertTrue(resp, resp.startsWith("HTTP/1.1 401"))
+            sock.close()
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun controlEndpointWithWrongTokenGets401() {
+        val server = startServer(token = "ctrlsecret") { null }
+        try {
+            val sock = post(server.port, "/control", tokenHeader = "wrong", body = "{}")
+            val resp = readHttpHeaders(sock.getInputStream())
+            assertTrue(resp, resp.startsWith("HTTP/1.1 401"))
+            sock.close()
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun controlEndpointWithValidTokenExecutesHandlerAndReturnsJson() {
+        val server = startServer(token = "ctrlsecret") { null }
+        server.controlHandler = { reqBody ->
+            """{"v":1,"id":42,"type":"response","ok":true,"result":{"applied":true}}"""
+        }
+        try {
+            val sock = post(server.port, "/control", tokenHeader = "ctrlsecret", body = """{"v":1,"id":42,"type":"camera.set"}""")
+            val headers = readHttpHeaders(sock.getInputStream())
+            assertTrue(headers, headers.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(headers, headers.contains("Content-Type: application/json"))
+            val inStream = sock.getInputStream()
+            val buf = ByteArray(1024)
+            val read = inStream.read(buf)
+            val body = String(buf, 0, read, Charsets.UTF_8)
+            assertTrue(body, body.contains(""""ok":true"""))
+            sock.close()
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun h264StreamEndpointStreamsRawBytes() {
+        val nal = byteArrayOf(0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f)
+        val server = startServer(token = "h264secret") { null }
+        var delivered = false
+        server.h264Supplier = {
+            if (!delivered) {
+                delivered = true
+                nal
+            } else {
+                null
+            }
+        }
+        try {
+            val sock = connect(server.port, "/stream.h264", "h264secret")
+            val headers = readHttpHeaders(sock.getInputStream())
+            assertTrue(headers, headers.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(headers, headers.contains("Content-Type: video/x-h264"))
+            val buf = ByteArray(8)
+            val read = sock.getInputStream().read(buf)
+            assertEquals(8, read)
+            assertArrayEquals(nal, buf)
             sock.close()
         } finally {
             server.stop()
