@@ -289,6 +289,7 @@ if [ "$DO_RELEASE" = true ]; then
 
   RELEASE_FILES=(
     "$ROOT_DIR/dist/camapro-scope-${VERSION}-linux-x86_64.tar.gz"
+    "$ROOT_DIR/dist/camapro-scope-${VERSION}-android-debug.apk"
     "$ROOT_DIR/dist/app-debug.apk"
     "$ROOT_DIR/dist/SHA256SUMS.txt"
   )
