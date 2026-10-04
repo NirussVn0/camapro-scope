@@ -174,9 +174,8 @@ impl GstPreviewController {
     /// Hand one frame to the pipeline. Returns false when the frame is
     /// dropped (no pipeline, failed open, or a write that stalls beyond the
     /// cap). A dropped frame is a preview hiccup, never a fatal error.
-    // ponytail: a dead child unblocks via EPIPE (all readers gone), but a
-    // live child with a full 64 KiB pipe buffer can block the pump until
-    // stop(). Upgrade path: O_NONBLOCK + poll once libc is approved.
+    // Initial open and every reopen are nonblocking: missing/slow readers cannot
+    // trap preview_stop() in a FIFO open or write while joining the pump.
     pub fn write(&mut self, frame: &[u8]) -> bool {
         if !self.active() {
             return false;
@@ -186,7 +185,7 @@ impl GstPreviewController {
             None => return false,
         };
         if self.writer.is_none() {
-            self.writer = OpenOptions::new().write(true).open(&path).ok();
+            self.writer = open_writer_nonblocking(&path).ok();
         }
         let file = match &mut self.writer {
             Some(w) => w,

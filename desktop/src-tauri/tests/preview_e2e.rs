@@ -102,3 +102,26 @@ fn tiny_jpeg_is_a_real_jpeg_pair() {
     assert_eq!(&TINY_JPEG[..2], &[0xFF, 0xD8]); // SOI
     assert_eq!(&TINY_JPEG[158..], &[0xFF, 0xD9]); // EOI
 }
+
+#[test]
+fn server_end_marks_preview_inactive_and_allows_restart() {
+    let (addr, _) = common::canned_server(http200_multipart(&multipart_body(1)));
+    let mut dispatcher =
+        CommandDispatcher::new(SessionController::new(6_000), NativePreviewSink::new());
+    dispatcher
+        .preview_start_with_sink("127.0.0.1", addr.port(), "tok", SinkMode::Fake)
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while dispatcher.preview_active() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !dispatcher.preview_active(),
+        "EOF must not leave status active"
+    );
+    let addr = phone_server(1);
+    dispatcher
+        .preview_start_with_sink("127.0.0.1", addr.port(), "tok", SinkMode::Fake)
+        .unwrap();
+    dispatcher.preview_stop();
+}

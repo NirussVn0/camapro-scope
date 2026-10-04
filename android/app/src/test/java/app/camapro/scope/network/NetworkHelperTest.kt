@@ -57,13 +57,15 @@ class NetworkHelperTest {
 
     @Test
     fun createsValidPairingJsonMatchingSchema() {
-        val jsonStr = NetworkHelper.createPairingJson("http://192.168.1.50:8100", "my-secret-token")
+        val secret = "ab".repeat(32)
+        val pin = "sha256:" + "cd".repeat(32)
+        val jsonStr = NetworkHelper.createPairingJson("https://192.168.1.50:8100", secret, pin)
         val json = JSONObject(jsonStr)
 
         assertEquals(1, json.getInt("version"))
-        assertEquals("http://192.168.1.50:8100", json.getString("endpoint_hint"))
-        assertEquals("my-secret-token", json.getString("secret"))
-        assertTrue(json.has("peer_fingerprint_sha256"))
+        assertEquals("https://192.168.1.50:8100", json.getString("endpoint_hint"))
+        assertEquals(secret, json.getString("secret"))
+        assertEquals(pin, json.getString("peer_fingerprint_sha256"))
         assertTrue(json.getLong("expires_at_ms") > System.currentTimeMillis())
     }
 }

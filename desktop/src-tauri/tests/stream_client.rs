@@ -35,7 +35,7 @@ fn server_401_maps_to_http_status_error() {
     let (addr, _requests) =
         canned_server(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_vec());
 
-    let err = StreamClient::start(addr.to_string(), "wrong".into()).unwrap_err();
+    let err = StreamClient::start(addr.to_string(), "tok".into()).unwrap_err();
     match err {
         StreamError::HttpStatus(401) => {}
         other => panic!("expected HttpStatus(401), got {other:?}"),
@@ -100,4 +100,44 @@ fn connection_refused_maps_to_connect_error() {
 
     let err = StreamClient::start(addr.to_string(), "tok".into()).unwrap_err();
     assert!(matches!(err, StreamError::Connect(_)), "got {err:?}");
+}
+
+#[test]
+fn slow_consumer_retains_only_two_newest_frames() {
+    let mut body = Vec::new();
+    for value in 0u8..100 {
+        body.extend_from_slice(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: 1\r\n\r\n");
+        body.extend_from_slice(&[value, b'\r', b'\n']);
+    }
+    let (addr, _) = canned_server(http200_multipart(&body));
+    let (mut client, frames) = StreamClient::start(addr.to_string(), "tok".into()).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames.recv().unwrap(), vec![98]);
+    assert_eq!(frames.recv().unwrap(), vec![99]);
+    client.stop();
+}
+
+#[test]
+fn stop_interrupts_trickled_partial_tls_record_without_join_stall() {
+    use std::io::Write;
+    let (tx, _) = mpsc::channel();
+    let addr = spawn_fake(tx, |stream| {
+        stream.write_all(&http200_multipart(&[])).unwrap();
+        stream.flush().unwrap();
+        // Record is deliberately incomplete; per-read polling alone can be renewed.
+        stream.sock.write_all(&[23, 3, 3, 0, 100]).unwrap();
+        for _ in 0..40 {
+            if stream.sock.write_all(&[0]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let (mut client, _) = StreamClient::start(addr.to_string(), "tok".into()).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    let started = std::time::Instant::now();
+    client.stop();
+    assert!(client.is_finished());
+    assert!(started.elapsed() < Duration::from_secs(1));
 }

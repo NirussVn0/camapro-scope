@@ -55,7 +55,7 @@ object NetworkHelper {
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
                         val ip = addr.hostAddress ?: continue
                         val type = classifyEndpoint(intf.name, ip)
-                        val streamUrl = "http://$ip:$port/stream?token=$token"
+                        val streamUrl = "https://$ip:$port/stream"
                         endpoints.add(
                             NetworkEndpoint(
                                 interfaceName = intf.name,
@@ -77,7 +77,7 @@ object NetworkHelper {
                 interfaceName = "lo",
                 ip = "127.0.0.1",
                 type = EndpointType.LOOPBACK,
-                streamUrl = "http://127.0.0.1:$port/stream?token=$token"
+                streamUrl = "https://127.0.0.1:$port/stream"
             )
         )
 
@@ -160,13 +160,16 @@ object NetworkHelper {
     fun createPairingJson(
         endpointUrl: String,
         token: String,
-        ttlMs: Long = 3600_000L
+        fingerprint: String,
+        ttlMs: Long = 300_000L
     ): String {
+        require(endpointUrl.startsWith("https://") && LanTls.validPin(fingerprint))
+        require(Regex("[0-9a-f]{64}").matches(token) && ttlMs in 1..300_000)
         return JSONObject().apply {
             put("version", 1)
             put("endpoint_hint", endpointUrl)
             put("secret", token)
-            put("peer_fingerprint_sha256", "camapro-android-v020")
+            put("peer_fingerprint_sha256", fingerprint)
             put("expires_at_ms", System.currentTimeMillis() + ttlMs)
         }.toString()
     }

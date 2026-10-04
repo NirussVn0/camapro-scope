@@ -5,10 +5,10 @@ use crate::platform::linux::preview::NativePreviewSink;
 use crate::platform::linux::virtual_output::{
     OutputState, VirtualOutputController, VirtualOutputError,
 };
+use crossbeam_channel as mpsc;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::JoinHandle;
@@ -148,6 +148,7 @@ impl CommandDispatcher {
         token: &str,
         sink: SinkMode,
     ) -> Result<(), PreviewError> {
+        self.reap_finished_preview();
         if self.preview_session.is_some() {
             return Err(PreviewError::AlreadyRunning);
         }
@@ -174,12 +175,20 @@ impl CommandDispatcher {
         let counter = Arc::clone(&self.frames_seen);
         let pump = std::thread::spawn(move || {
             loop {
+                if !gst.active() {
+                    break;
+                }
                 match frames.recv_timeout(Duration::from_millis(200)) {
                     Ok(frame) => {
                         counter.fetch_add(1, Ordering::SeqCst);
                         let _ = gst.write(&frame);
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if !gst.active() {
+                            break;
+                        }
+                        continue;
+                    }
                     // stream client ended (server closed or stop()) → teardown
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
@@ -211,7 +220,18 @@ impl CommandDispatcher {
         self.frames_seen.load(Ordering::SeqCst)
     }
 
-    pub fn preview_active(&self) -> bool {
+    fn reap_finished_preview(&mut self) {
+        let finished = self.preview_session.as_ref().is_some_and(|s| {
+            s.pump.as_ref().is_none_or(JoinHandle::is_finished)
+                || s.client.lock().map(|c| c.is_finished()).unwrap_or(true)
+        });
+        if finished {
+            self.preview_stop();
+        }
+    }
+
+    pub fn preview_active(&mut self) -> bool {
+        self.reap_finished_preview();
         self.preview_session.is_some()
     }
 
@@ -225,19 +245,14 @@ impl CommandDispatcher {
         payload: CameraSetPayload,
     ) -> Result<serde_json::Value, String> {
         use std::io::{Read, Write};
-        use std::net::TcpStream;
-        use std::time::Duration;
 
         let addr = format!("{host}:{port}");
-        let socket_addr = addr
-            .parse()
-            .map_err(|e| format!("Invalid address {addr}: {e}"))?;
-
-        let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(3000))
-            .map_err(|e| format!("Cannot reach phone at {addr}: {e}"))?;
-
-        stream.set_read_timeout(Some(Duration::from_millis(3000))).ok();
-        stream.set_write_timeout(Some(Duration::from_millis(3000))).ok();
+        let mut stream = crate::core::control::lan_tls::connect(&addr, token)?;
+        let _deadline = crate::core::control::socket_deadline::SocketDeadline::new(
+            &stream.sock,
+            Duration::from_secs(5),
+        )
+        .map_err(|e| e.to_string())?;
 
         let req_body = serde_json::json!({
             "v": 1,
@@ -258,10 +273,34 @@ impl CommandDispatcher {
             body_str.len()
         );
 
-        stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| e.to_string())?;
 
         let mut resp = String::new();
-        stream.read_to_string(&mut resp).map_err(|e| e.to_string())?;
+        let mut byte = [0];
+        while !resp.ends_with("\r\n\r\n") {
+            if resp.len() >= 8192 {
+                return Err("Response headers too large".into());
+            }
+            stream.read_exact(&mut byte).map_err(|e| e.to_string())?;
+            resp.push(byte[0] as char);
+        }
+        let length: usize = resp
+            .lines()
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .ok_or("Missing response length")?
+            .1
+            .trim()
+            .parse()
+            .map_err(|_| "Invalid response length")?;
+        if length > 65536 {
+            return Err("Response too large".into());
+        }
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).map_err(|e| e.to_string())?;
+        resp.push_str(std::str::from_utf8(&body).map_err(|_| "Invalid response encoding")?);
 
         if let Some(idx) = resp.find("\r\n\r\n") {
             let (headers, body_part) = resp.split_at(idx + 4);

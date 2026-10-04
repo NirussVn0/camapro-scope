@@ -2,7 +2,7 @@
 type: Execution Roadmap
 status: Active (v0.3.0 Release)
 version: 0.3.0
-last_updated: 2026-09-27
+last_updated: 2026-10-01
 owner: NirussVn0
 authority: docs/ROADMAP.md
 ---
@@ -46,13 +46,15 @@ G0 Windows feasibility + G1 portability + G5 → G8 Windows delivery
 * **Pending:** Resolving Chrome Linux MMAP buffer negotiation on `/dev/video*`; verifying concurrent OBS Studio + browser capture.
 
 ### G4 — Live Controls & Recovery
-* **Status:** **COMPLETE**
+* **Status:** **Core Implemented; LAN TLS Device Qualification and Production Lease Integration Pending**
 * **Deliverables:**
   * Typed `camera_set` commands and Android `setControl` interface.
   * Live camera control sliders (EV, ISO, shutter, focus) in desktop UI with real-time feedback.
   * `POST /control` authenticated wire endpoint on `MjpegHttpServer` with fail-closed validation.
   * Dynamic repeating capture request updates in `Camera2Source`.
-  * 2-way network pairing handshake with mutual confirmation, ML Kit QR code scanner on mobile (`QrScanActivity.kt`), zero-dependency QR code SVG rendering on desktop, and ADB USB reverse tethering support.
+   * 2-way network pairing handshake with mutual confirmation, ML Kit QR code scanner on mobile (`QrScanActivity.kt`), zero-dependency QR code SVG rendering on desktop, and ADB USB reverse tethering support.
+* **LAN correction (2026-10-01):** Desktop-issued QR binds a real TLS certificate pin and random expiring single-use secret. Phone commits trust before a private confirmation callback; desktop emits pairing success only after an authenticated committed-endpoint probe. Control/status/media use pinned TLS 1.3 and header authorization. Desktop endpoint selection no longer substitutes its own LAN address for the phone; preview requires explicit Connect.
+* **Pending acceptance:** Physical AndroidKeyStore-to-rustls LAN handshake, host Secret Service persistence, and real camera preview remain unverified. Phone Start currently starts capture; desktop Disconnect ends local preview only. Production capture is not yet integrated with authenticated session stop/watchdog, so this correction does not establish full D04 compliance. TLS 1.3 requires a supporting phone provider; older devices fail closed.
 
 ### G5 — Linux Release Candidate (Physical Qualification)
 * **Status:** **Awaiting Physical Phone Test**

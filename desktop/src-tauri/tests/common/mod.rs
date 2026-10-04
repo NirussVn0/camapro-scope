@@ -3,10 +3,11 @@
 //! helper.
 #![allow(dead_code)]
 
+use camapro_scope_lib::core::control::lan_tls::{fingerprint, remember_peer, Identity, Peer};
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpListener;
-use std::net::TcpStream;
+pub type ServerStream = rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -31,7 +32,7 @@ pub struct SeenRequest {
 }
 
 /// Read the request head (up to \r\n\r\n) and extract path + token.
-pub fn read_head(stream: &mut TcpStream) -> SeenRequest {
+pub fn read_head(stream: &mut impl Read) -> SeenRequest {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -83,12 +84,26 @@ pub fn http200_multipart(body: &[u8]) -> Vec<u8> {
 /// response), keep the stream open until the handler returns.
 pub fn spawn_fake<F>(requests: mpsc::Sender<SeenRequest>, respond: F) -> std::net::SocketAddr
 where
-    F: FnOnce(&mut TcpStream) + Send + 'static,
+    F: FnOnce(&mut ServerStream) + Send + 'static,
 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let identity = Identity::generate().unwrap();
+    let config = identity.server_config().unwrap();
+    remember_peer(
+        &addr.to_string(),
+        Peer {
+            pin: fingerprint(&identity.cert),
+            token: "tok".into(),
+        },
+        Identity::generate().unwrap(),
+        false,
+    )
+    .unwrap();
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        let mut stream =
+            rustls::StreamOwned::new(rustls::ServerConnection::new(config).unwrap(), socket);
         let seen = read_head(&mut stream);
         let _ = requests.send(seen);
         respond(&mut stream);

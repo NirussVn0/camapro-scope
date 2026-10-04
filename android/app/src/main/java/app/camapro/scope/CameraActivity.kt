@@ -36,6 +36,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import app.camapro.scope.camera.Camera2Source
 import app.camapro.scope.network.NetworkHelper
+import app.camapro.scope.network.LanTls
 import app.camapro.scope.service.CameraStreamService
 import app.camapro.scope.transport.BoundedFrameQueue
 import app.camapro.scope.transport.MjpegHttpServer
@@ -45,7 +46,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
-import kotlin.random.Random
 
 /**
  * Main Mobile Controller for Camapro Scope:
@@ -59,14 +59,17 @@ import kotlin.random.Random
 class CameraActivity : ComponentActivity() {
 
     private val queue = BoundedFrameQueue()
-    private var server: MjpegHttpServer? = null
+    @Volatile private var server: MjpegHttpServer? = null
     private var cameraSource: Camera2Source? = null
     private var scheduler: ScheduledExecutorService? = null
     private var frameTask: ScheduledFuture<*>? = null
     private var isUsingRealCamera = false
     private var autoStartOnPermission = false
 
-    private var token: String = Random.nextLong(0x10000000, 0xFFFFFFF0).toString(16)
+    private val token: String get() = lanTls.credentials.token
+    private val lanTls by lazy { LanTls(this) }
+    private val enrollmentLock = Any()
+    private var pendingDesktopPayload: String? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var displayMode: ScopeUi.DisplayMode = ScopeUi.DEFAULT_DISPLAY_MODE
 
@@ -270,7 +273,10 @@ class CameraActivity : ComponentActivity() {
         })
 
         setContentView(root)
-        refreshEndpoints()
+        try { refreshEndpoints() } catch (_: Exception) {
+            bind("Secure LAN credential storage unavailable")
+            return
+        }
         bind(null)
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -390,10 +396,21 @@ class CameraActivity : ComponentActivity() {
     }
 
     private fun handleScannedDesktopPayload(raw: String) {
+        val endpoint = server
+        if (endpoint == null) {
+            pendingDesktopPayload = raw
+            Toast.makeText(this, "Press Start on phone to enable the TLS endpoint, then pair", Toast.LENGTH_LONG).show()
+            return
+        }
         try {
             val json = JSONObject(raw)
+            require(json.getInt("version") == 1 && json.getString("endpoint_hint").startsWith("https://")) { "Pinned HTTPS QR required" }
+            require(System.currentTimeMillis() < json.getLong("expires_at_ms")) { "Pairing QR expired" }
+            val pin = json.getString("peer_fingerprint_sha256")
+            require(LanTls.validPin(pin)) { "Invalid desktop certificate pin" }
             val secret = json.optString("secret", "")
             val port = json.optInt("port", 8101)
+            require(port in 1..65535 && Regex("[0-9a-f]{64}").matches(secret)) { "Invalid pairing secret or port" }
             val ips = ArrayList<String>()
 
             val ipsArray = json.optJSONArray("desktop_ips")
@@ -407,7 +424,7 @@ class CameraActivity : ComponentActivity() {
             }
             if (ips.isEmpty()) {
                 val hint = json.optString("endpoint_hint", "")
-                val extracted = hint.replace("http://", "").replace("ws://", "").split("/").firstOrNull()?.split(":")?.firstOrNull()
+                val extracted = java.net.URI(hint).host
                 if (!extracted.isNullOrBlank()) ips.add(extracted)
             }
 
@@ -420,20 +437,29 @@ class CameraActivity : ComponentActivity() {
             Toast.makeText(this, "Connecting to Desktop...", Toast.LENGTH_SHORT).show()
 
             // Run network pairing on background thread
-            Executors.newSingleThreadExecutor().execute {
+            Thread({
                 var pairedSuccess = false
+                var phoneCommitted = false
                 var connectedIp = ""
                 var lastError = "No response from desktop"
 
-                val myPort = server?.port ?: MjpegHttpServer.DEFAULT_PORT
-                val myEndpoints = NetworkHelper.getAvailableEndpoints(myPort, token)
-                val myIp = myEndpoints.firstOrNull { it.type != NetworkHelper.EndpointType.LOOPBACK }?.ip ?: "127.0.0.1"
+                val myPort = endpoint.port
                 val myDeviceName = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
-
+                var enrollment: app.camapro.scope.network.LanCredentials.Enrollment? = null
+                try {
+                    synchronized(enrollmentLock) {
+                        if (server !== endpoint || isDestroyed) return@Thread
+                        require(System.currentTimeMillis() < json.getLong("expires_at_ms")) { "Pairing QR expired" }
+                        enrollment = lanTls.credentials.begin(pin, json.getLong("expires_at_ms"))
+                        endpoint.replaceTlsFactory(lanTls.serverFactory(pin), provisional = true)
+                    }
                 for (desktopIp in ips) {
+                    if (server !== endpoint) return@Thread
+                    var conn: javax.net.ssl.HttpsURLConnection? = null
                     try {
-                        val url = java.net.URL("http://$desktopIp:$port/pair")
-                        val conn = url.openConnection() as java.net.HttpURLConnection
+                        require(Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}").matches(desktopIp)) { "QR endpoint must be IPv4" }
+                        val url = java.net.URL("https://$desktopIp:$port/pair")
+                        conn = lanTls.openPinned(url, pin)
                         conn.requestMethod = "POST"
                         conn.connectTimeout = 3000
                         conn.readTimeout = 3000
@@ -442,10 +468,10 @@ class CameraActivity : ComponentActivity() {
 
                         val body = JSONObject().apply {
                             put("secret", secret)
-                            put("phone_ip", myIp)
                             put("phone_port", myPort)
                             put("phone_token", token)
                             put("phone_name", myDeviceName)
+                            put("phone_fingerprint_sha256", lanTls.fingerprint)
                         }.toString()
 
                         conn.outputStream.use { os ->
@@ -454,6 +480,29 @@ class CameraActivity : ComponentActivity() {
 
                         val code = conn.responseCode
                         if (code == 200) {
+                            synchronized(enrollmentLock) {
+                                check(server === endpoint && !isDestroyed) { "Endpoint stopped during pairing" }
+                                require(System.currentTimeMillis() < json.getLong("expires_at_ms")) { "Pairing QR expired" }
+                                lanTls.credentials.commit(checkNotNull(enrollment))
+                                phoneCommitted = true
+                                endpoint.replaceTlsFactory(lanTls.serverFactory())
+                            }
+                            conn.disconnect()
+                            synchronized(enrollmentLock) {
+                                check(server === endpoint && lanTls.credentials.isCommitted(checkNotNull(enrollment))) { "Stale committed enrollment" }
+                            }
+                            conn = lanTls.openPinned(java.net.URL("https://$desktopIp:$port/pair/confirm"), pin)
+                            conn.requestMethod = "POST"
+                            conn.connectTimeout = 3000
+                            conn.readTimeout = 3000
+                            conn.doOutput = true
+                            conn.setRequestProperty("Content-Type", "application/json")
+                            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                            val confirmedCode = conn.responseCode
+                            check(confirmedCode == 200) { "Desktop confirmation rejected (HTTP $confirmedCode)" }
+                            synchronized(enrollmentLock) {
+                                check(server === endpoint && lanTls.credentials.isCommitted(checkNotNull(enrollment))) { "Stale confirmation" }
+                            }
                             pairedSuccess = true
                             connectedIp = desktopIp
                             break
@@ -462,16 +511,34 @@ class CameraActivity : ComponentActivity() {
                         }
                     } catch (e: Exception) {
                         lastError = e.message ?: "Connection timed out"
+                        if (phoneCommitted) {
+                            // Confirmation may have succeeded remotely even if its reply was lost.
+                            // Retain the approved pin; never roll back after sending confirmation.
+                            lastError = "Phone trust committed; desktop confirmation incomplete. Generate a fresh Desktop QR. ($lastError)"
+                            break
+                        }
+                    } finally {
+                        conn?.disconnect()
+                    }
+                }
+                } catch (e: Exception) {
+                    lastError = e.message ?: "Enrollment rejected"
+                } finally {
+                    synchronized(enrollmentLock) {
+                        enrollment?.let { attempt ->
+                            if (lanTls.credentials.abort(attempt) && server === endpoint) {
+                                try { endpoint.replaceTlsFactory(lanTls.serverFactory()) }
+                                catch (_: Exception) { endpoint.stop(); server = null }
+                            }
+                        }
                     }
                 }
 
                 mainHandler.post {
+                    if (server !== endpoint || isDestroyed) return@post
                     if (pairedSuccess) {
                         centerHint.text = "✓ Paired with Desktop ($connectedIp)"
-                        Toast.makeText(this@CameraActivity, "✓ Paired with Desktop ($connectedIp)! Video active.", Toast.LENGTH_LONG).show()
-                        if (server == null) {
-                            startStreaming()
-                        }
+                        Toast.makeText(this@CameraActivity, "✓ Paired with Desktop ($connectedIp). Press Connect on desktop.", Toast.LENGTH_LONG).show()
                     } else {
                         centerHint.text = "❌ Cannot reach Desktop ($lastError)"
                         AlertDialog.Builder(this@CameraActivity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
@@ -481,7 +548,7 @@ class CameraActivity : ComponentActivity() {
                             .show()
                     }
                 }
-            }
+            }, "lan-pairing").start()
         } catch (e: Exception) {
             Toast.makeText(this, "Invalid pairing payload: ${e.message}", Toast.LENGTH_LONG).show()
         }
@@ -529,12 +596,16 @@ class CameraActivity : ComponentActivity() {
     }
 
     private fun startStreamingInternal(preferRealCamera: Boolean) {
-        val s = MjpegHttpServer(
+        val s = try { MjpegHttpServer(
             frameSupplier = { queue.dequeue() },
             token = token,
             bindAddress = "0.0.0.0",
-            controlHandler = { jsonStr -> processControlMessage(jsonStr) }
-        )
+            controlHandler = { jsonStr -> processControlMessage(jsonStr) },
+            tlsFactory = lanTls.serverFactory()
+        ) } catch (e: Exception) {
+            bind("TLS identity unavailable: ${e.message}")
+            return
+        }
         try {
             s.start()
         } catch (e: Exception) {
@@ -576,6 +647,10 @@ class CameraActivity : ComponentActivity() {
 
         refreshEndpoints()
         bind(null)
+        pendingDesktopPayload?.let { raw ->
+            pendingDesktopPayload = null
+            handleScannedDesktopPayload(raw)
+        }
     }
 
     private fun startSyntheticFallback(reason: String?) {
@@ -591,6 +666,12 @@ class CameraActivity : ComponentActivity() {
     }
 
     private fun stopStreaming() {
+        synchronized(enrollmentLock) {
+            pendingDesktopPayload = null
+            server?.stop()
+            server = null
+            try { lanTls.credentials.cancel() } catch (_: Exception) {}
+        }
         frameTask?.cancel(false)
         frameTask = null
         scheduler?.shutdownNow()
@@ -601,8 +682,6 @@ class CameraActivity : ComponentActivity() {
         cameraSource = null
         isUsingRealCamera = false
 
-        server?.stop()
-        server = null
         queue.clear()
 
         CameraStreamService.stop(this)

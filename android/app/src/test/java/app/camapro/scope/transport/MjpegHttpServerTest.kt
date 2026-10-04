@@ -14,6 +14,59 @@ import java.nio.charset.StandardCharsets.US_ASCII
  * (ephemeral port). No Robolectric, no instrumentation.
  */
 class MjpegHttpServerTest {
+    @Test
+    fun `trickled incomplete TLS handshake headers and body hit absolute deadline`() {
+        for (kind in listOf("headers", "TLS", "body")) {
+            val tls = kind == "TLS"
+            val factory = if (tls) javax.net.ssl.SSLContext.getInstance("TLSv1.3").apply { init(null, null, null) }.serverSocketFactory else null
+            val server = MjpegHttpServer({ null }, "secret", requestedPort = 0, tlsFactory = factory)
+            server.start()
+            val sock = Socket("127.0.0.1", server.port)
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+            try {
+                val started = System.nanoTime()
+                if (tls) sock.getOutputStream().write(byteArrayOf(22, 3, 3, 0, 100, 1, 0, 0, 96))
+                else if (kind == "body") sock.getOutputStream().write("POST /control HTTP/1.1\r\nX-Camapro-Token: secret\r\nContent-Length: 100\r\n\r\n{".toByteArray())
+                else sock.getOutputStream().write("GET /status HTTP/1.1\r\nX-Slow: ".toByteArray())
+                pool.submit {
+                    try {
+                        while (!Thread.currentThread().isInterrupted) {
+                            sock.getOutputStream().write(if (tls) 0 else 'a'.code)
+                            sock.getOutputStream().flush()
+                            Thread.sleep(200)
+                        }
+                    } catch (_: Exception) {}
+                }
+                val closed = pool.submit<Boolean> {
+                    try {
+                        // JSSE may send a TLS alert before EOF when the deadline closes it.
+                        while (sock.getInputStream().read() != -1) {}
+                        true
+                    } catch (_: java.io.IOException) { true }
+                }
+                try {
+                    assertTrue("absolute deadline must close trickled connection", closed.get(6500, java.util.concurrent.TimeUnit.MILLISECONDS))
+                    assertTrue("test must trickle an incomplete handshake/request until deadline", System.nanoTime() - started >= 4_000_000_000L)
+                } catch (_: java.util.concurrent.TimeoutException) {
+                    fail("Trickle monopolized worker beyond absolute deadline ($kind)")
+                }
+            } finally { sock.close(); server.stop(); pool.shutdownNow() }
+        }
+    }
+
+    @Test
+    fun `authenticated stream readiness cancels deadline`() {
+        val queue = BoundedFrameQueue()
+        val server = startServer { queue.dequeue() }
+        try {
+            connect(server.port, "/stream", "secret").use { sock ->
+                assertTrue(readHttpHeaders(sock.getInputStream()).startsWith("HTTP/1.1 200"))
+                Thread.sleep(5500)
+                queue.enqueue("after-deadline".toByteArray(US_ASCII))
+                assertEquals(1, parseParts(sock.getInputStream(), 1).size)
+            }
+        } finally { server.stop() }
+    }
 
     private fun startServer(token: String = "secret", supplier: () -> ByteArray?): MjpegHttpServer {
         val server = MjpegHttpServer(frameSupplier = supplier, token = token, requestedPort = 0)
@@ -194,7 +247,7 @@ class MjpegHttpServerTest {
     }
 
     @Test
-    fun `second client is served sequentially after first disconnects`() {
+    fun `status and control stay available during media and second media is rejected`() {
         val queue = BoundedFrameQueue()
         queue.enqueue("a-frame".toByteArray(US_ASCII))
         val server = startServer { queue.dequeue() }
@@ -205,48 +258,63 @@ class MjpegHttpServerTest {
             assertEquals(1, partsA.size)
             assertArrayEquals("a-frame".toByteArray(US_ASCII), partsA[0])
 
-            // B connects but must NOT be served while A holds the single writer.
-            val b = connect(server.port, "/stream", "secret", soTimeoutMs = 600)
-            var bServedEarly = false
-            try {
-                b.getInputStream().read()
-                bServedEarly = true
-            } catch (e: SocketTimeoutException) {
-                // expected: nothing accepted yet
+            connect(server.port, "/status", "secret").use { status ->
+                assertTrue(readHttpHeaders(status.getInputStream()).startsWith("HTTP/1.1 200"))
             }
-            assertFalse("server must serve sequentially, not concurrently", bServedEarly)
-            b.soTimeout = 5000
-
-            // A hangs up -> writer loop observes EOF, accept loop takes B.
+            server.controlHandler = { "{\"ok\":true}" }
+            post(server.port, "/control", "secret", "{}").use { control ->
+                assertTrue(readHttpHeaders(control.getInputStream()).startsWith("HTTP/1.1 200"))
+            }
+            connect(server.port, "/stream", "secret").use { b ->
+                assertTrue(readHttpHeaders(b.getInputStream()).startsWith("HTTP/1.1 409"))
+            }
             a.close()
-            val headerB = readHttpHeaders(b.getInputStream())
-            assertTrue(headerB, headerB.startsWith("HTTP/1.1 200"))
-
-            queue.enqueue("b-frame".toByteArray(US_ASCII))
-            val partsB = parseParts(b.getInputStream(), 1)
-            assertEquals(1, partsB.size)
-            assertArrayEquals("b-frame".toByteArray(US_ASCII), partsB[0])
-            b.close()
         } finally {
             server.stop()
         }
     }
 
     @Test
-    fun queryParameterTokenAuthenticatesStream() {
+    fun `LAN cannot bind without TLS`() {
+        val server = MjpegHttpServer({ null }, "secret", requestedPort = 0, bindAddress = "0.0.0.0")
+        try {
+            server.start()
+            fail("Plaintext LAN binding must be rejected")
+        } catch (_: IllegalStateException) {
+        } finally { server.stop() }
+    }
+
+    @Test
+    fun `stopped endpoint cannot be restarted by late pairing`() {
+        val server = startServer { null }
+        server.stop()
+        try {
+            server.start()
+            fail("Late pairing must not reopen a stopped endpoint")
+        } catch (_: IllegalStateException) {}
+    }
+
+    @Test
+    fun `status and h264 reject URL-only authorization`() {
+        val server = startServer { null }
+        try {
+            for (path in listOf("/status", "/stream.h264?token=secret")) {
+                connect(server.port, path, null).use { sock ->
+                    assertTrue(readHttpHeaders(sock.getInputStream()).startsWith("HTTP/1.1 401"))
+                }
+            }
+        } finally { server.stop() }
+    }
+
+    @Test
+    fun queryParameterTokenDoesNotAuthenticateStream() {
         val queue = BoundedFrameQueue()
         val server = startServer(token = "querysecret") { queue.dequeue() }
         try {
             // Connect with ?token=querysecret in the URL, without X-Camapro-Token header
             val sock = connect(server.port, "/stream?token=querysecret", tokenHeader = null)
             val header = readHttpHeaders(sock.getInputStream())
-            assertTrue(header, header.startsWith("HTTP/1.1 200"))
-            assertTrue(header, header.contains("multipart/x-mixed-replace"))
-
-            queue.enqueue("query-frame".toByteArray(US_ASCII))
-            val parts = parseParts(sock.getInputStream(), 1)
-            assertEquals(1, parts.size)
-            assertArrayEquals("query-frame".toByteArray(US_ASCII), parts[0])
+            assertTrue(header, header.startsWith("HTTP/1.1 401"))
             sock.close()
         } finally {
             server.stop()
@@ -257,9 +325,10 @@ class MjpegHttpServerTest {
     fun statusEndpointReturns200OkWithJson() {
         val server = startServer(token = "statussecret") { null }
         try {
-            val sock = connect(server.port, "/status", tokenHeader = null)
+            val sock = connect(server.port, "/status", tokenHeader = "statussecret")
             val header = readHttpHeaders(sock.getInputStream())
             assertTrue(header, header.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(header, header.contains("X-Camapro-Ready: true"))
             assertTrue(header, header.contains("application/json"))
             assertTrue(header, header.contains("Access-Control-Allow-Origin: *"))
             sock.close()
@@ -344,4 +413,3 @@ class MjpegHttpServerTest {
         }
     }
 }
-

@@ -6,21 +6,19 @@
 //! pushes exact frame bytes onto an `mpsc::Receiver`. A clean server EOF
 //! closes the channel; `stop()` signals shutdown and joins the thread.
 
+use crossbeam_channel::{self as channel, Receiver, Sender, TrySendError};
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
-use std::net::TcpStream;
-use std::net::ToSocketAddrs;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::Sender;
-use std::sync::mpsc::{self};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
 use super::mjpeg_parser::MjpegStreamParser;
+use crate::core::control::lan_tls::{self, TlsStream};
 
 /// Parser buffer cap: a 4 MiB JPEG head can never legitimately appear;
 /// overflow aborts the stream instead of growing memory.
@@ -45,6 +43,7 @@ pub enum StreamError {
 pub struct StreamClient {
     stop: Arc<AtomicBool>,
     reader: Option<JoinHandle<()>>,
+    socket: std::net::TcpStream,
 }
 
 impl std::fmt::Debug for StreamClient {
@@ -61,11 +60,13 @@ impl StreamClient {
     pub fn start(
         addr: String,
         token: String,
-    ) -> Result<(StreamClient, mpsc::Receiver<Vec<u8>>), StreamError> {
-        let sock = resolve(&addr).map_err(|e| StreamError::Connect(e.to_string()))?;
-        let mut stream = TcpStream::connect_timeout(&sock, HEAD_TIMEOUT)
-            .map_err(|e| StreamError::Connect(e.to_string()))?;
+    ) -> Result<(StreamClient, Receiver<Vec<u8>>), StreamError> {
+        let mut stream = lan_tls::connect(&addr, &token).map_err(StreamError::Connect)?;
+        let head_deadline =
+            crate::core::control::socket_deadline::SocketDeadline::new(&stream.sock, HEAD_TIMEOUT)
+                .map_err(|e| StreamError::Connect(e.to_string()))?;
         stream
+            .sock
             .set_read_timeout(Some(READ_POLL))
             .map_err(|e| StreamError::Connect(e.to_string()))?;
 
@@ -78,17 +79,24 @@ impl StreamClient {
 
         let head = read_head(&mut stream)?;
         validate_head(&head)?;
+        drop(head_deadline); // Validated media readiness; do not time-limit the stream.
 
         let stop = Arc::new(AtomicBool::new(false));
+        let socket = stream
+            .sock
+            .try_clone()
+            .map_err(|e| StreamError::Connect(e.to_string()))?;
         let stop_flag = Arc::clone(&stop);
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = channel::bounded::<Vec<u8>>(2);
+        let drop_oldest = rx.clone();
         let reader = std::thread::spawn(move || {
-            read_frames(stream, tx, stop_flag);
+            read_frames(stream, tx, drop_oldest, stop_flag);
         });
         Ok((
             StreamClient {
                 stop,
                 reader: Some(reader),
+                socket,
             },
             rx,
         ))
@@ -97,9 +105,14 @@ impl StreamClient {
     /// Signal shutdown, close the socket via thread-exit, join. Idempotent.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        let _ = self.socket.shutdown(std::net::Shutdown::Both);
         if let Some(handle) = self.reader.take() {
             let _ = handle.join();
         }
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.reader.as_ref().is_none_or(JoinHandle::is_finished)
     }
 }
 
@@ -109,19 +122,16 @@ impl Drop for StreamClient {
     }
 }
 
-fn resolve(addr: &str) -> std::io::Result<std::net::SocketAddr> {
-    addr.to_socket_addrs()?
-        .next()
-        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, "no addresses"))
-}
-
 /// Read bytes until \r\n\r\n (response head), honoring the stop-free
 /// HEAD_TIMEOUT budget via short read polls.
-fn read_head(stream: &mut TcpStream) -> Result<Vec<u8>, StreamError> {
+fn read_head(stream: &mut impl Read) -> Result<Vec<u8>, StreamError> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     let deadline = Instant::now() + HEAD_TIMEOUT;
     loop {
+        if Instant::now() >= deadline {
+            return Err(StreamError::Connect("head_timeout".into()));
+        }
         match stream.read(&mut byte) {
             Ok(0) => return Err(StreamError::ServerEnd),
             Ok(_) => {
@@ -159,7 +169,12 @@ fn validate_head(head: &[u8]) -> Result<(), StreamError> {
     Ok(())
 }
 
-fn read_frames(mut stream: TcpStream, tx: Sender<Vec<u8>>, stop: Arc<AtomicBool>) {
+fn read_frames(
+    mut stream: TlsStream,
+    tx: Sender<Vec<u8>>,
+    drop_oldest: Receiver<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+) {
     let mut parser = MjpegStreamParser::new(MAX_BUFFER_BYTES);
     let mut chunk = [0u8; 8192];
     loop {
@@ -171,9 +186,19 @@ fn read_frames(mut stream: TcpStream, tx: Sender<Vec<u8>>, stop: Arc<AtomicBool>
             Ok(n) => {
                 match parser.feed(&chunk[..n]) {
                     Ok(frames) => {
-                        for f in frames {
-                            if tx.send(f).is_err() || stop.load(Ordering::SeqCst) {
-                                return; // receiver gone or stopping
+                        for mut f in frames {
+                            loop {
+                                if stop.load(Ordering::SeqCst) {
+                                    return;
+                                }
+                                match tx.try_send(f) {
+                                    Ok(()) => break,
+                                    Err(TrySendError::Full(frame)) => {
+                                        let _ = drop_oldest.try_recv();
+                                        f = frame;
+                                    }
+                                    Err(TrySendError::Disconnected(_)) => return,
+                                }
                             }
                         }
                     }

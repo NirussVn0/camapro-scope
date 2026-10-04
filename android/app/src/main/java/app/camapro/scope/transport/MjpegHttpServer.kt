@@ -15,21 +15,17 @@ import java.nio.charset.StandardCharsets.US_ASCII
  * Requests without a matching `X-Camapro-Token` header get 401; any other
  * path gets 404.
  *
- * Clients are served sequentially (one in-flight connection at a time) —
- * ponytail: single accept loop; add a per-client thread only when a second
- * concurrent consumer is a real requirement.
- *
- * Binds 127.0.0.1 only. LAN binding is an explicit later decision (needs
- * token/auth threat model first). [port] = 0 picks an ephemeral port (tests);
- * production default is 8100.
+ * One media writer plus concurrent control/status; a bounded executor owns sockets.
+ * LAN requires mutual TLS; plaintext is available only on loopback for JVM tests.
  */
 class MjpegHttpServer(
     private val frameSupplier: () -> ByteArray?,
     private val token: String,
     requestedPort: Int = DEFAULT_PORT,
-    private val bindAddress: String = "0.0.0.0",
+    private val bindAddress: String = "127.0.0.1",
     var controlHandler: ((String) -> String)? = null,
-    var h264Supplier: (() -> ByteArray?)? = null
+    var h264Supplier: (() -> ByteArray?)? = null,
+    private var tlsFactory: javax.net.ssl.SSLServerSocketFactory? = null
 ) {
     private val bindPort = requestedPort
     companion object {
@@ -40,12 +36,16 @@ class MjpegHttpServer(
 
     @Volatile
     private var running = false
+    private var terminated = false
+    @Volatile private var enrollmentOnly = false
 
     @Volatile
     private var serverSocket: ServerSocket? = null
 
-    @Volatile
-    private var client: Socket? = null
+    private val clients = java.util.concurrent.ConcurrentHashMap.newKeySet<Socket>()
+    private val mediaWriter = java.util.concurrent.Semaphore(1)
+    private var workers: java.util.concurrent.ThreadPoolExecutor? = null
+    private var deadlines: java.util.concurrent.ScheduledThreadPoolExecutor? = null
 
     private var thread: Thread? = null
 
@@ -59,9 +59,24 @@ class MjpegHttpServer(
 
     @Synchronized
     fun start() {
+        check(!terminated) { "Stopped endpoint cannot be restarted" }
         if (running) return
-        val ss = ServerSocket(bindPort, 8, InetAddress.getByName(bindAddress))
+        val factory = tlsFactory
+        check(factory != null || InetAddress.getByName(bindAddress).isLoopbackAddress) { "LAN requires pinned TLS" }
+        val ss = if (factory != null) {
+            (factory.createServerSocket(bindPort, 8, InetAddress.getByName(bindAddress)) as javax.net.ssl.SSLServerSocket).apply {
+                enabledProtocols = arrayOf("TLSv1.3")
+                needClientAuth = true
+            }
+        } else ServerSocket(bindPort, 8, InetAddress.getByName(bindAddress))
         serverSocket = ss
+        deadlines = java.util.concurrent.ScheduledThreadPoolExecutor(1, java.util.concurrent.ThreadFactory { r ->
+            Thread(r, "mjpeg-request-deadline").apply { isDaemon = true }
+        }).apply { removeOnCancelPolicy = true }
+        workers = java.util.concurrent.ThreadPoolExecutor(2, 2, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+            java.util.concurrent.ArrayBlockingQueue(8), java.util.concurrent.ThreadFactory { r ->
+                Thread(r, "mjpeg-tls-client").apply { isDaemon = true }
+            })
         running = true
         thread = Thread({ acceptLoop(ss) }, "mjpeg-http-accept").apply {
             isDaemon = true
@@ -72,59 +87,101 @@ class MjpegHttpServer(
     /** Closes the listening socket and any in-flight client; idempotent. */
     @Synchronized
     fun stop() {
+        terminated = true
+        closeSockets()
+    }
+
+    private fun closeSockets() {
         running = false
         try {
             serverSocket?.close()
         } catch (_: IOException) {
         }
         serverSocket = null
-        try {
-            client?.close()
-        } catch (_: IOException) {
-        }
-        client = null
+        disconnectClients()
+        workers?.shutdownNow()
+        workers = null
+        deadlines?.shutdownNow()
+        deadlines = null
+    }
+
+    fun disconnectClients() {
+        clients.forEach { try { it.close() } catch (_: IOException) {} }
+        clients.clear()
+    }
+
+    /** New trust generation gets a fresh TLS context, including its session cache. */
+    @Synchronized
+    fun replaceTlsFactory(factory: javax.net.ssl.SSLServerSocketFactory, provisional: Boolean = false) {
+        check(!terminated && running) { "Endpoint was stopped during pairing" }
+        closeSockets()
+        thread?.join(3500)
+        tlsFactory = factory
+        enrollmentOnly = provisional
+        start()
     }
 
     private fun acceptLoop(ss: ServerSocket) {
-        while (running) {
+        while (running && !ss.isClosed) {
             try {
                 val sock = ss.accept()
-                client = sock
+                sock.soTimeout = 3000
+                clients.add(sock)
+                var deadline: java.util.concurrent.ScheduledFuture<*>? = null
                 try {
-                    handleClient(sock)
-                } finally {
-                    try {
-                        sock.close()
-                    } catch (_: IOException) {
+                    val requestDeadline = deadlines?.schedule({ try { sock.close() } catch (_: IOException) {} }, 5000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        ?: throw java.util.concurrent.RejectedExecutionException()
+                    deadline = requestDeadline
+                    val executor = workers ?: throw java.util.concurrent.RejectedExecutionException()
+                    executor.execute {
+                        try { handleClient(sock, requestDeadline) } catch (_: IOException) {
+                            // TLS rejection, bounded read timeout, or disconnect.
+                        } finally {
+                            requestDeadline.cancel(false)
+                            try { sock.close() } catch (_: IOException) {}
+                            clients.remove(sock)
+                        }
                     }
-                    client = null
+                } catch (_: java.util.concurrent.RejectedExecutionException) {
+                    deadline?.cancel(false)
+                    sock.close()
+                    clients.remove(sock)
                 }
             } catch (_: IOException) {
                 // stop() closed the socket, or a transient accept error.
-                if (!running) break
+                if (!running || ss.isClosed) break
             }
         }
     }
 
-    private fun handleClient(sock: Socket) {
+    private fun handleClient(sock: Socket, deadline: java.util.concurrent.ScheduledFuture<*>) {
+        if (sock is javax.net.ssl.SSLSocket) sock.startHandshake()
+        handleRequest(sock, deadline)
+    }
+
+    private fun handleRequest(sock: Socket, deadline: java.util.concurrent.ScheduledFuture<*>) {
         val input = sock.getInputStream()
         val headerText = readHeaders(input) ?: return
         val lines = headerText.split("\r\n")
         val requestLine = lines.firstOrNull()?.split(" ") ?: return
         val method = requestLine.getOrNull(0)
         val rawUri = requestLine.getOrNull(1) ?: ""
-        val (path, query) = if (rawUri.contains("?")) {
-            val idx = rawUri.indexOf("?")
-            rawUri.substring(0, idx) to rawUri.substring(idx + 1)
-        } else {
-            rawUri to ""
+        val path = rawUri.substringBefore('?')
+        if (enrollmentOnly && (method != "GET" || path != "/status")) {
+            respondSimple(sock, input, "403 Forbidden")
+            return
         }
 
         if (method == "GET" && path == "/status") {
+            if (headersValue(lines, TOKEN_HEADER) != token) {
+                respondSimple(sock, input, "401 Unauthorized")
+                return
+            }
             val json = "{\"status\":\"ok\",\"service\":\"camapro-scope\",\"port\":$port}\r\n"
             val body = json.toByteArray(US_ASCII)
             val res = "HTTP/1.1 200 OK\r\n" +
                     "Content-Type: application/json\r\n" +
+                    "X-Camapro-Ready: ${!enrollmentOnly}\r\n" +
                     "Access-Control-Allow-Origin: *\r\n" +
                     "Content-Length: ${body.size}\r\n" +
                     "Connection: close\r\n\r\n"
@@ -157,6 +214,7 @@ class MjpegHttpServer(
                 if (r == -1) break
                 readBytes += r
             }
+            if (readBytes != contentLength) return
             val body = String(bodyBytes, 0, readBytes, Charsets.UTF_8)
             val handler = controlHandler
             if (handler == null) {
@@ -171,13 +229,17 @@ class MjpegHttpServer(
         }
 
         if (method == "GET" && path == "/stream.h264") {
-            val queryToken = query.split("&").firstOrNull { it.startsWith("token=") }?.removePrefix("token=")
-            val requestToken = headersValue(lines, TOKEN_HEADER) ?: queryToken
+            val requestToken = headersValue(lines, TOKEN_HEADER)
 
             if (requestToken != token) {
                 respondSimple(sock, input, "401 Unauthorized")
                 return
             }
+            if (!mediaWriter.tryAcquire()) {
+                respondSimple(sock, input, "409 Conflict")
+                return
+            }
+            try {
 
             val response = "HTTP/1.1 200 OK\r\n" +
                     "Content-Type: video/x-h264\r\n" +
@@ -186,6 +248,7 @@ class MjpegHttpServer(
             val out = sock.getOutputStream()
             out.write(response.toByteArray(US_ASCII))
             out.flush()
+            deadline.cancel(false) // Authenticated media readiness ends the request budget.
 
             val supplier = h264Supplier ?: frameSupplier
             while (running) {
@@ -205,6 +268,7 @@ class MjpegHttpServer(
                     return
                 }
             }
+            } finally { mediaWriter.release() }
             return
         }
 
@@ -213,13 +277,17 @@ class MjpegHttpServer(
             return
         }
 
-        val queryToken = query.split("&").firstOrNull { it.startsWith("token=") }?.removePrefix("token=")
-        val requestToken = headersValue(lines, TOKEN_HEADER) ?: queryToken
+        val requestToken = headersValue(lines, TOKEN_HEADER)
 
         if (requestToken != token) {
             respondSimple(sock, input, "401 Unauthorized")
             return
         }
+        if (!mediaWriter.tryAcquire()) {
+            respondSimple(sock, input, "409 Conflict")
+            return
+        }
+        try {
 
         val response = "HTTP/1.1 200 OK\r\n" +
                 "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n" +
@@ -228,6 +296,7 @@ class MjpegHttpServer(
         val out = sock.getOutputStream()
         out.write(response.toByteArray(US_ASCII))
         out.flush()
+        deadline.cancel(false)
 
         while (running) {
             val frame = frameSupplier()
@@ -249,6 +318,7 @@ class MjpegHttpServer(
                 return // client disconnect: stop writer, no crash
             }
         }
+        } finally { mediaWriter.release() }
     }
 
     private fun readHeaders(input: InputStream): String? {

@@ -72,9 +72,24 @@ fn camera_set_dispatches_http_post_and_parses_response() {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    use camapro_scope_lib::core::control::lan_tls::{fingerprint, remember_peer, Identity, Peer};
+    let identity = Identity::generate().unwrap();
+    let config = identity.server_config().unwrap();
+    remember_peer(
+        &format!("127.0.0.1:{port}"),
+        Peer {
+            pin: fingerprint(&identity.cert),
+            token: "test-token".into(),
+        },
+        Identity::generate().unwrap(),
+        false,
+    )
+    .unwrap();
 
     let server_thread = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        let mut stream =
+            rustls::StreamOwned::new(rustls::ServerConnection::new(config).unwrap(), socket);
         let mut buf = [0u8; 2048];
         let n = stream.read(&mut buf).unwrap();
         let req = String::from_utf8_lossy(&buf[..n]);
@@ -109,8 +124,10 @@ fn camera_set_dispatches_http_post_and_parses_response() {
     assert!(res.is_ok(), "camera_set failed: {:?}", res.err());
     let res_json = res.unwrap();
     assert_eq!(res_json["ok"], true);
-    assert_eq!(res_json["result"]["applied"]["exposureCompensationSteps"], 2);
+    assert_eq!(
+        res_json["result"]["applied"]["exposureCompensationSteps"],
+        2
+    );
 
     server_thread.join().unwrap();
 }
-

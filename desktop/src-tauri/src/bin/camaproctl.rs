@@ -76,42 +76,13 @@ fn main() {
                 }
             }
 
-            use std::io::{Read, Write};
-            use std::net::TcpStream;
-            use std::time::Duration;
-
             let addr = format!("{host}:{port}");
-            let socket_addr = match addr.parse() {
-                Ok(a) => a,
+            match camapro_scope_lib::core::control::lan_tls::status(&addr) {
+                Ok(()) => println!("status: online (authenticated TLS)"),
                 Err(e) => {
-                    eprintln!("Invalid address {addr}: {e}");
+                    eprintln!("Phone status failed: {e}");
                     exit(1);
                 }
-            };
-
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_millis(2000)) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Cannot reach phone at {addr}: {e}");
-                    exit(1);
-                }
-            };
-
-            let req = format!("GET /status HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-            let _ = stream.write_all(req.as_bytes());
-            let mut resp = String::new();
-            let _ = stream.read_to_string(&mut resp);
-
-            if resp.contains("200 OK") {
-                if let Some(idx) = resp.find("\r\n\r\n") {
-                    println!("{}", resp[idx + 4..].trim());
-                } else {
-                    println!("status: online");
-                }
-                exit(0);
-            } else {
-                eprintln!("Phone returned non-200 response:\n{resp}");
-                exit(1);
             }
         }
 
@@ -155,7 +126,10 @@ fn main() {
                 match args[i].as_str() {
                     "--ev" if i + 1 < args.len() => {
                         let val: i32 = args[i + 1].parse().unwrap_or(0);
-                        changes.insert("exposureCompensationSteps".to_string(), serde_json::json!(val));
+                        changes.insert(
+                            "exposureCompensationSteps".to_string(),
+                            serde_json::json!(val),
+                        );
                         i += 2;
                     }
                     "--iso" if i + 1 < args.len() => {
@@ -199,7 +173,10 @@ fn main() {
 
             match dispatcher.camera_set(host, port, token, payload) {
                 Ok(res) => {
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap_or_else(|_| res.to_string()));
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&res).unwrap_or_else(|_| res.to_string())
+                    );
                     exit(0);
                 }
                 Err(e) => {

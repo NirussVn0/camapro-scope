@@ -77,7 +77,7 @@ fn preview_stop(state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn preview_status(state: State<AppState>) -> Result<serde_json::Value, String> {
-    let dispatcher = state.0.lock().map_err(|_| "state poisoned")?;
+    let mut dispatcher = state.0.lock().map_err(|_| "state poisoned")?;
     Ok(serde_json::json!({
         "active": dispatcher.preview_active(),
         "frames": dispatcher.preview_frames(),
@@ -86,32 +86,9 @@ fn preview_status(state: State<AppState>) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn check_phone_status(host: String, port: u16) -> Result<serde_json::Value, String> {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    use std::time::Duration;
-
     let addr = format!("{host}:{port}");
-    let socket_addr = addr
-        .parse()
-        .map_err(|e| format!("Invalid address {addr}: {e}"))?;
-
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(2000))
-        .map_err(|e| format!("Cannot reach phone at {addr}: {e}"))?;
-
-    stream.set_read_timeout(Some(Duration::from_millis(2000))).ok();
-    stream.set_write_timeout(Some(Duration::from_millis(2000))).ok();
-
-    let req = format!("GET /status HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
-
-    let mut resp = String::new();
-    stream.read_to_string(&mut resp).map_err(|e| e.to_string())?;
-
-    if resp.contains("200 OK") {
-        Ok(serde_json::json!({ "online": true, "host": host, "port": port }))
-    } else {
-        Err(format!("Phone returned unexpected response: {resp}"))
-    }
+    core::control::lan_tls::status(&addr)?;
+    Ok(serde_json::json!({ "online": true, "host": host, "port": port }))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -133,7 +110,10 @@ fn check_network_environment() -> NetworkDiagnostic {
         if text.contains("Status: Connected") {
             vpn_active = true;
             vpn_service = Some("NordVPN".to_string());
-            if let Ok(set_out) = std::process::Command::new("nordvpn").arg("settings").output() {
+            if let Ok(set_out) = std::process::Command::new("nordvpn")
+                .arg("settings")
+                .output()
+            {
                 let s_text = String::from_utf8_lossy(&set_out.stdout);
                 if s_text.contains("LAN Discovery: disabled") {
                     lan_blocked_hint = Some(

@@ -1,7 +1,8 @@
+use super::lan_tls::{self, Identity, Peer};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpListener, UdpSocket};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
 /// Phone pairing payload received from the phone when scanning desktop QR.
@@ -16,9 +17,101 @@ pub struct PhonePairedEvent {
 #[derive(Default)]
 struct PairingState {
     current_secret: Option<String>,
-    expires_at_ms: u64,
+    deadline: Option<Instant>,
     port: u16,
     running: bool,
+    pending: Option<PendingEnrollment>,
+}
+
+struct PendingEnrollment {
+    host: String,
+    enrollment: Enrollment,
+    deadline: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PairingRoute {
+    Prepare,
+    Confirm,
+}
+
+impl PairingState {
+    fn issue(&mut self, secret: String, now: Instant) {
+        self.current_secret = Some(secret);
+        self.pending = None;
+        self.deadline = Some(now + Duration::from_secs(300));
+    }
+    fn process(
+        &mut self,
+        route: PairingRoute,
+        req: Enrollment,
+        host: String,
+        now: Instant,
+        probe: impl FnOnce(&str, &Peer, bool) -> Result<(), String>,
+        finish: impl FnOnce(PhonePairedEvent, Peer) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let deadline = match route {
+            PairingRoute::Prepare => {
+                let expires = self.deadline.ok_or("No active QR")?;
+                if !self.consume(&req.secret, now) {
+                    return Err("Invalid or consumed QR".into());
+                }
+                expires.min(now + Duration::from_secs(30))
+            }
+            PairingRoute::Confirm => {
+                let pending = self.pending.as_ref().ok_or("No pending enrollment")?;
+                if now >= pending.deadline {
+                    self.pending = None;
+                    return Err("Completion expired".into());
+                }
+                if pending.host != host || pending.enrollment != req {
+                    return Err("Completion binding mismatch".into());
+                }
+                // One matching completion attempt; failure also burns it, never replay.
+                self.pending.take().ok_or("No pending enrollment")?.deadline
+            }
+        };
+        let addr = format!("{host}:{}", req.phone_port);
+        let peer = Peer {
+            pin: req.phone_fingerprint_sha256.clone(),
+            token: req.phone_token.clone(),
+        };
+        probe(&addr, &peer, route == PairingRoute::Confirm)?;
+        if Instant::now() >= deadline {
+            return Err("Enrollment expired during probe".into());
+        }
+        match route {
+            PairingRoute::Prepare => {
+                self.pending = Some(PendingEnrollment {
+                    host,
+                    enrollment: req,
+                    deadline,
+                });
+                Ok(()) // Initial HTTP 200 authorizes phone commit; not desktop success.
+            }
+            PairingRoute::Confirm => finish(
+                PhonePairedEvent {
+                    host,
+                    port: req.phone_port,
+                    token: req.phone_token,
+                    name: req.phone_name,
+                },
+                peer,
+            ),
+        }
+    }
+
+    fn consume(&mut self, secret: &str, now: Instant) -> bool {
+        if self.deadline.is_some_and(|deadline| now < deadline)
+            && self.current_secret.as_deref() == Some(secret)
+        {
+            self.current_secret = None;
+            self.deadline = None;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -83,233 +176,402 @@ impl PairingServer {
         ips
     }
 
-    /// Starts the pairing HTTP listener if not running, generates a one-time secret,
-    /// and returns the complete QR payload for the phone to scan.
+    /// TLS callback enrollment. QR binds the desktop certificate and a one-time secret.
     pub fn start_pairing_session(
         &self,
         app: tauri::AppHandle,
     ) -> Result<serde_json::Value, String> {
+        let identity = Identity::load()?;
+        let tls_config = identity.server_config()?;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_millis() as u64;
-
-        let secret = format!("{:016x}", now_ms ^ 0x5a5a_3c3c_9696_e1e1);
-        let expires_at_ms = now_ms + 300_000; // 5 minutes
-
+        let secret = lan_tls::random_secret()?;
         let mut st = self.state.lock().map_err(|_| "poisoned lock")?;
-        st.current_secret = Some(secret.clone());
-        st.expires_at_ms = expires_at_ms;
-
         if !st.running {
-            // Find an open port starting from 8101
-            let mut bound_listener = None;
-            let mut port = 8101;
-            for p in 8101..8120 {
-                if let Ok(listener) = TcpListener::bind(format!("0.0.0.0:{p}")) {
-                    bound_listener = Some(listener);
-                    port = p;
-                    break;
-                }
-            }
-
-            let listener = bound_listener.ok_or("Failed to bind pairing port on 8101-8120")?;
-            st.port = port;
+            let listener = (8101..8120)
+                .find_map(|port| TcpListener::bind(("0.0.0.0", port)).ok())
+                .ok_or("Failed to bind pairing port")?;
+            st.port = listener.local_addr().map_err(|e| e.to_string())?.port();
             st.running = true;
-
-            let state_clone = Arc::clone(&self.state);
+            let state = Arc::clone(&self.state);
+            let identity_clone = identity.clone();
             std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    let mut stream = match stream {
-                        Ok(s) => s,
-                        Err(_) => continue,
+                // Bounded single enrollment worker; a client cannot spawn arbitrary threads.
+                for socket in listener.incoming().flatten() {
+                    let Ok(_deadline) = super::socket_deadline::SocketDeadline::new(
+                        &socket,
+                        Duration::from_secs(5),
+                    ) else {
+                        continue;
                     };
-                    let app_clone = app.clone();
-                    let state_ref = Arc::clone(&state_clone);
-                    std::thread::spawn(move || {
-                        handle_client(&mut stream, app_clone, state_ref);
-                    });
+                    let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+                    let _ = socket.set_write_timeout(Some(Duration::from_secs(3)));
+                    if let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&tls_config)) {
+                        let peer_ip = socket.peer_addr().ok().map(|a| a.ip());
+                        let mut stream = rustls::StreamOwned::new(conn, socket);
+                        let outcome = read_enrollment(&mut stream).and_then(|(route, req)| {
+                            let mut guard = state
+                                .lock()
+                                .map_err(|_| "Trust state poisoned".to_string())?;
+                            // The callback socket identifies the phone's reachable LAN interface.
+                            let host = peer_ip.ok_or("Missing peer address")?.to_string();
+                            guard.process(
+                                route,
+                                req,
+                                host,
+                                Instant::now(),
+                                |addr, peer, ready| {
+                                    if ready {
+                                        lan_tls::probe_ready(addr, peer, &identity_clone)
+                                    } else {
+                                        lan_tls::probe(addr, peer, &identity_clone)
+                                    }
+                                },
+                                |event, peer| {
+                                    let addr = format!("{}:{}", event.host, event.port);
+                                    lan_tls::remember_peer(
+                                        &addr,
+                                        peer,
+                                        identity_clone.clone(),
+                                        true,
+                                    )?;
+                                    app.emit("phone-paired", &event).map_err(|e| e.to_string())
+                                },
+                            )
+                        });
+                        let (status, body) = if outcome.is_ok() {
+                            ("200 OK", "{\"status\":\"ok\"}")
+                        } else {
+                            ("401 Unauthorized", "{\"status\":\"error\",\"message\":\"Enrollment rejected; start phone and scan a fresh QR\"}")
+                        };
+                        let _ = stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+                        stream.conn.send_close_notify();
+                        let _ = stream.flush();
+                    }
                 }
             });
         }
-
+        st.issue(secret.clone(), Instant::now());
         let ips = Self::get_candidate_ips();
-        let primary_ip = ips.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
+        let primary_ip = ips.first().cloned().unwrap_or_else(|| "127.0.0.1".into());
         let port = st.port;
-
-        let payload = serde_json::json!({
-            "version": 1,
-            "type": "camapro_pairing",
-            "desktop_ips": ips,
-            "port": port,
-            "secret": secret,
-            "endpoint_hint": format!("http://{primary_ip}:{port}/pair"),
-            "peer_fingerprint_sha256": format!("sha256:{:064x}", now_ms),
-            "expires_at_ms": expires_at_ms
-        });
-
-        Ok(payload)
+        Ok(serde_json::json!({
+            "version": 1, "type": "camapro_pairing", "desktop_ips": ips, "port": port,
+            "secret": secret, "endpoint_hint": format!("https://{primary_ip}:{port}/pair"),
+            "peer_fingerprint_sha256": lan_tls::fingerprint(&identity.cert),
+            "expires_at_ms": now_ms + 300_000
+        }))
     }
 }
 
-fn handle_client(
-    stream: &mut TcpStream,
-    app: tauri::AppHandle,
-    state: Arc<Mutex<PairingState>>,
-) {
-    let peer_addr = stream.peer_addr().ok();
-    let mut buf = [0u8; 4096];
-    let n = match stream.read(&mut buf) {
-        Ok(n) if n > 0 => n,
-        _ => return,
-    };
+#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Enrollment {
+    secret: String,
+    phone_port: u16,
+    phone_token: String,
+    phone_name: String,
+    phone_fingerprint_sha256: String,
+}
 
-    let req_str = String::from_utf8_lossy(&buf[..n]);
-    let first_line = req_str.lines().next().unwrap_or("");
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-    if parts.len() < 2 {
-        return;
-    }
-
-    let method = parts[0];
-    let full_path = parts[1];
-    let path = full_path.split('?').next().unwrap_or("");
-    let query = if full_path.contains('?') {
-        full_path.split('?').nth(1).unwrap_or("")
-    } else {
-        ""
-    };
-
-    if method == "OPTIONS" {
-        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\n\r\n";
-        let _ = stream.write_all(resp.as_bytes());
-        return;
-    }
-
-    if path == "/status" || path == "/ping" {
-        let body = "{\"status\":\"ok\",\"service\":\"camapro-desktop\"}\r\n";
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = stream.write_all(resp.as_bytes());
-        return;
-    }
-
-    if path != "/pair" {
-        let body = "Not Found\r\n";
-        let resp = format!(
-            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = stream.write_all(resp.as_bytes());
-        return;
-    }
-
-    // Extract fields from query params or JSON body
-    let mut secret = String::new();
-    let mut phone_ip = String::new();
-    let mut phone_port: u16 = 8100;
-    let mut phone_token = String::new();
-    let mut phone_name = "Android Phone".to_string();
-
-    // Check query params first
-    for q in query.split('&') {
-        let mut kv = q.split('=');
-        if let (Some(k), Some(v)) = (kv.next(), kv.next()) {
-            match k {
-                "secret" => secret = v.to_string(),
-                "phone_ip" | "ip" => phone_ip = v.to_string(),
-                "phone_port" | "port" => phone_port = v.parse().unwrap_or(8100),
-                "phone_token" | "token" => phone_token = v.to_string(),
-                "phone_name" | "name" => phone_name = v.to_string(),
-                _ => {}
-            }
+fn read_enrollment(stream: &mut impl Read) -> Result<(PairingRoute, Enrollment), String> {
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() >= 8192 {
+            return Err("Header too large".into());
         }
+        let mut byte = [0];
+        stream.read_exact(&mut byte).map_err(|e| e.to_string())?;
+        head.push(byte[0]);
     }
-
-    // If body contains JSON, parse it
-    if let Some(body_start) = req_str.find("\r\n\r\n") {
-        let body_str = &req_str[body_start + 4..];
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body_str.trim()) {
-            if let Some(s) = json.get("secret").and_then(|v| v.as_str()) {
-                secret = s.to_string();
-            }
-            if let Some(ip) = json.get("phone_ip").and_then(|v| v.as_str()) {
-                phone_ip = ip.to_string();
-            }
-            if let Some(p) = json.get("phone_port").and_then(|v| v.as_u64()) {
-                phone_port = p as u16;
-            }
-            if let Some(t) = json.get("phone_token").and_then(|v| v.as_str()) {
-                phone_token = t.to_string();
-            }
-            if let Some(n) = json.get("phone_name").and_then(|v| v.as_str()) {
-                phone_name = n.to_string();
-            }
-        }
-    }
-
-    // If phone_ip is empty or loopback, fall back to socket's actual peer IP
-    if phone_ip.is_empty() || phone_ip == "127.0.0.1" || phone_ip == "0.0.0.0" {
-        if let Some(SocketAddr::V4(v4)) = peer_addr {
-            phone_ip = v4.ip().to_string();
-        }
-    }
-
-    // Validate secret against current session
-    let is_valid = {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        if let Ok(st) = state.lock() {
-            if let Some(ref cur) = st.current_secret {
-                cur == &secret && now_ms <= st.expires_at_ms
-            } else {
-                false
-            }
-        } else {
-            false
-        }
+    let head = std::str::from_utf8(&head).map_err(|_| "Invalid header")?;
+    let route = match head.lines().next() {
+        Some("POST /pair HTTP/1.1") => PairingRoute::Prepare,
+        Some("POST /pair/confirm HTTP/1.1") => PairingRoute::Confirm,
+        _ => return Err("POST JSON required".into()),
     };
-
-    if !is_valid {
-        let body = "{\"status\":\"error\",\"message\":\"Invalid or expired pairing secret\"}\r\n";
-        let resp = format!(
-            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = stream.write_all(resp.as_bytes());
-        return;
+    let mut lengths = head
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"));
+    let length: usize = lengths
+        .next()
+        .ok_or("Missing Content-Length")?
+        .1
+        .trim()
+        .parse()
+        .map_err(|_| "Invalid length")?;
+    if lengths.next().is_some()
+        || length == 0
+        || length > 4096
+        || head
+            .lines()
+            .any(|l| l.to_ascii_lowercase().starts_with("transfer-encoding:"))
+    {
+        return Err("Invalid body framing".into());
     }
-
-    // Emit event to Tauri frontend!
-    let event = PhonePairedEvent {
-        host: phone_ip,
-        port: phone_port,
-        token: phone_token,
-        name: phone_name,
-    };
-    let _ = app.emit("phone-paired", &event);
-
-    let body = "{\"status\":\"ok\",\"message\":\"Paired successfully with Desktop\"}\r\n";
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(resp.as_bytes());
-    let _ = stream.flush();
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).map_err(|e| e.to_string())?;
+    let req: Enrollment = serde_json::from_slice(&body).map_err(|_| "Invalid enrollment JSON")?;
+    if req.phone_port == 0
+        || req.secret.len() != 64
+        || !lan_tls::valid_pin(&req.phone_fingerprint_sha256)
+        || req.phone_token.len() != 64
+        || !req.phone_token.bytes().all(|b| b.is_ascii_hexdigit())
+        || req.phone_name.len() > 128
+    {
+        return Err("Invalid enrollment fields".into());
+    }
+    Ok((route, req))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn enrollment() -> Enrollment {
+        Enrollment {
+            secret: "ab".repeat(32),
+            phone_port: 8100,
+            phone_token: "cd".repeat(32),
+            phone_name: "Phone".into(),
+            phone_fingerprint_sha256: format!("sha256:{}", "ef".repeat(32)),
+        }
+    }
 
+    fn prepared(now: Instant) -> PairingState {
+        let req = enrollment();
+        let mut state = PairingState {
+            current_secret: Some(req.secret.clone()),
+            deadline: Some(now + Duration::from_secs(300)),
+            ..Default::default()
+        };
+        state
+            .process(
+                PairingRoute::Prepare,
+                req,
+                "192.168.1.2".into(),
+                now,
+                |_, _, ready| {
+                    assert!(!ready);
+                    Ok(())
+                },
+                |_, _| panic!("Initial HTTP 200 must not persist or emit success"),
+            )
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn prepare_never_finalizes_confirm_requires_fresh_ready_probe_and_is_single_use() {
+        let now = Instant::now();
+        let mut state = prepared(now);
+        assert!(state.current_secret.is_none());
+        assert_eq!(
+            state.pending.as_ref().unwrap().deadline,
+            now + Duration::from_secs(30)
+        );
+        assert!(state
+            .process(
+                PairingRoute::Prepare,
+                enrollment(),
+                "192.168.1.2".into(),
+                now,
+                |_, _, _| panic!("QR replay must fail before probe"),
+                |_, _| panic!("Replay must not finalize")
+            )
+            .is_err());
+        let calls = std::cell::Cell::new(0);
+        state
+            .process(
+                PairingRoute::Confirm,
+                enrollment(),
+                "192.168.1.2".into(),
+                now,
+                |addr, peer, ready| {
+                    assert_eq!(addr, "192.168.1.2:8100");
+                    assert_eq!(peer.pin, enrollment().phone_fingerprint_sha256);
+                    assert!(ready);
+                    calls.set(1);
+                    Ok(())
+                },
+                |event, _| {
+                    assert_eq!(calls.get(), 1);
+                    assert_eq!(event.host, "192.168.1.2");
+                    calls.set(2);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(state.pending.is_none());
+        assert!(state
+            .process(
+                PairingRoute::Confirm,
+                enrollment(),
+                "192.168.1.2".into(),
+                now,
+                |_, _, _| panic!("Completion replay"),
+                |_, _| panic!("Duplicate success")
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn completion_binds_socket_peer_pin_port_token_and_original_secret() {
+        let now = Instant::now();
+        let mut state = prepared(now);
+        for field in 0..5 {
+            let mut req = enrollment();
+            let mut host = "192.168.1.2".to_string();
+            match field {
+                0 => host = "192.168.1.3".into(),
+                1 => req.phone_fingerprint_sha256 = format!("sha256:{}", "11".repeat(32)),
+                2 => req.phone_port += 1,
+                3 => req.phone_token = "22".repeat(32),
+                _ => req.secret = "33".repeat(32),
+            }
+            assert!(state
+                .process(
+                    PairingRoute::Confirm,
+                    req,
+                    host,
+                    now,
+                    |_, _, _| panic!("Wrong binding must fail before probe"),
+                    |_, _| panic!("Wrong binding must not finalize")
+                )
+                .is_err());
+            assert!(state.pending.is_some());
+        }
+    }
+
+    #[test]
+    fn expired_missing_and_not_ready_completion_cannot_finalize() {
+        let now = Instant::now();
+        let mut state = prepared(now);
+        assert!(state
+            .process(
+                PairingRoute::Confirm,
+                enrollment(),
+                "192.168.1.2".into(),
+                now + Duration::from_secs(30),
+                |_, _, _| panic!("Expired completion"),
+                |_, _| panic!("Expired success")
+            )
+            .is_err());
+        assert!(state.pending.is_none());
+        state = prepared(now);
+        assert!(state
+            .process(
+                PairingRoute::Confirm,
+                enrollment(),
+                "192.168.1.2".into(),
+                now,
+                |_, _, ready| {
+                    assert!(ready);
+                    Err("Phone is still provisional".into())
+                },
+                |_, _| panic!("No success before ready")
+            )
+            .is_err());
+        assert!(state.pending.is_none());
+        assert!(state
+            .process(
+                PairingRoute::Confirm,
+                enrollment(),
+                "192.168.1.2".into(),
+                now,
+                |_, _, _| panic!("No pending capability"),
+                |_, _| panic!("No pending success")
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn completion_never_extends_original_qr_expiry() {
+        let now = Instant::now();
+        let mut state = PairingState {
+            current_secret: Some(enrollment().secret),
+            deadline: Some(now + Duration::from_secs(1)),
+            ..Default::default()
+        };
+        state
+            .process(
+                PairingRoute::Prepare,
+                enrollment(),
+                "192.168.1.2".into(),
+                now,
+                |_, _, _| Ok(()),
+                |_, _| panic!("Prepare cannot finalize"),
+            )
+            .unwrap();
+        assert_eq!(
+            state.pending.as_ref().unwrap().deadline,
+            now + Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn fresh_qr_invalidates_old_pending_completion() {
+        let now = Instant::now();
+        let mut state = prepared(now);
+        state.issue("44".repeat(32), now);
+        assert!(state.pending.is_none());
+        assert!(state
+            .process(
+                PairingRoute::Confirm,
+                enrollment(),
+                "192.168.1.2".into(),
+                now,
+                |_, _, _| panic!("Old confirmation cannot probe"),
+                |_, _| panic!("Old success")
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn parser_accepts_only_exact_private_prepare_and_confirm_routes() {
+        let req = enrollment();
+        let body = serde_json::json!({"secret": req.secret, "phone_port": req.phone_port, "phone_token": req.phone_token, "phone_name": req.phone_name, "phone_fingerprint_sha256": req.phone_fingerprint_sha256}).to_string();
+        for path in ["/pair", "/pair/confirm"] {
+            let message = format!(
+                "POST {path} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            assert!(read_enrollment(&mut message.as_bytes()).is_ok());
+        }
+        let message = format!(
+            "POST /pair/confirm?secret=bad HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        assert!(read_enrollment(&mut message.as_bytes()).is_err());
+    }
+    #[test]
+    fn enrollment_secret_is_single_use_and_expiring() {
+        let now = Instant::now();
+        let mut state = PairingState {
+            current_secret: Some("secret".into()),
+            deadline: Some(now + Duration::from_secs(1)),
+            ..Default::default()
+        };
+        assert!(!state.consume("wrong", now));
+        assert!(state.consume("secret", now));
+        assert!(!state.consume("secret", now));
+        state.current_secret = Some("secret".into());
+        state.deadline = Some(now);
+        assert!(!state.consume("secret", now));
+    }
+    #[test]
+    fn enrollment_parser_rejects_query_and_oversize_and_truncated_body() {
+        for input in [
+            "GET /pair?secret=x HTTP/1.1\r\n\r\n",
+            "POST /pair HTTP/1.1\r\nContent-Length: 4097\r\n\r\n",
+            "POST /pair HTTP/1.1\r\nContent-Length: 2\r\n\r\n{",
+        ] {
+            assert!(read_enrollment(&mut input.as_bytes()).is_err());
+        }
+    }
     #[test]
     fn candidate_ips_always_includes_loopback_and_non_empty() {
         let ips = PairingServer::get_candidate_ips();
@@ -317,4 +579,3 @@ mod tests {
         assert!(ips.contains(&"127.0.0.1".to_string()));
     }
 }
-

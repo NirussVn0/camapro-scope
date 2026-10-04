@@ -2,7 +2,7 @@
 type: Protocol Specification
 status: Frozen v1 Contract (Active)
 version: 1.0.0
-last_updated: 2026-09-19
+last_updated: 2026-10-01
 owner: NirussVn0
 authority: docs/PROTOCOL.md
 ---
@@ -15,10 +15,12 @@ Control and media are separate logical channels bound to the same authenticated 
 * **Control Channel:** WebSocket (WSS) / HTTP JSON control messages.
 * **Media Channel:** Authenticated MJPEG HTTP stream with bounded frames (future: encrypted H.264).
 * **Pairing Flow (D03):** 
-  1. Phone generates expiring one-time secret and displays QR code binding endpoint IP, port, fingerprint, and secret.
-  2. Desktop scans/receives QR and performs mutual TLS/identity verification.
-  3. Secret is consumed atomically on successful enrollment; credentials persist in platform secure storage (`TrustStore` / `keyring-rs`).
+  1. Desktop generates an expiring one-time secret and displays QR binding callback endpoint IP, port, its actual certificate fingerprint, and secret. Phone scans and pins that identity.
+  2. Phone calls the pinned HTTPS enrollment callback with its endpoint certificate fingerprint and authorization credential. Desktop verifies the phone through a pinned mutual TLS status probe. The initial QR secret is consumed atomically; a failed probe requires a fresh QR.
+  3. Phone commits approved trust and confirms completion through a private pinned HTTPS callback. The pending completion ticket is single-use, bounded by the original QR expiry and 30 seconds, and bound to both endpoint credentials and callback peer address. Desktop verifies committed endpoint readiness before storing enrollment and emitting pairing success. Credentials persist in encrypted phone preferences and desktop `keyring-rs`; storage failures fail closed.
   4. Header-bound session authorization is required for every control and media request (no bearer tokens in URLs, mDNS, or logs).
+
+The desktop-issued enrollment callbacks are bootstrap transport details, not new v1 control-message types. These mechanisms are implemented with synthetic transport tests; actual AndroidKeyStore/desktop interoperability still requires device qualification. The lifecycle rules below remain requirements: the current production Activity capture path does not yet integrate remote stop and watchdog ownership.
 
 ---
 
